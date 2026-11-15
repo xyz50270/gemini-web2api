@@ -99,10 +99,12 @@ func NewClient(cfg config.Config) *Client {
 		}
 	}
 
+	cookies := NewCookieCache(cfg.CookieFile)
+
 	return &Client{
 		Cfg:     cfg,
-		HTTP:    req,
-		Cookies: NewCookieCache(cfg.CookieFile),
+		HTTP:    newRotatingRequester(req, cookies),
+		Cookies: cookies,
 		Logf:    logFn,
 		bl:      cfg.GeminiBL,
 	}
@@ -162,8 +164,16 @@ func (c *Client) buildHeaders() http.Header {
 		h.Set("X-Goog-AuthUser", authUser)
 	}
 
-	if cookieInfo.Cookie != "" {
-		h.Set("Cookie", cookieInfo.Cookie)
+	// Prefer the jar: it carries any SIDCC/PSIDTS rotation the server has applied
+	// since the file was read, which is what keeps the session alive.
+	cookieStr := cookieInfo.Cookie
+	if c.Cookies != nil {
+		if live := c.Cookies.Current(); live != "" {
+			cookieStr = live
+		}
+	}
+	if cookieStr != "" {
+		h.Set("Cookie", cookieStr)
 	}
 	if cookieInfo.SAPISID != "" {
 		hash := SAPISIDHash(cookieInfo.SAPISID)

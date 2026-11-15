@@ -30,8 +30,13 @@ type Account struct {
 	Client *gemini.Client
 	Tokens *multimodal.TokenCache
 
-	mu             sync.RWMutex
-	xsrfToken      string
+	mu        sync.RWMutex
+	xsrfToken string
+	// xsrfFailedAt records the last failed page-token fetch. A 302 on /app means
+	// the session is gone and will not fix itself within seconds, so retrying on
+	// every request just floods the log; back off instead.
+	xsrfFailedAt   time.Time
+	xsrfFailReason string
 	quota          *gemini.Quota
 	quotaErr       string
 	exhaustedUntil time.Time
@@ -126,18 +131,18 @@ func (a *Account) Available(threshold float64, now time.Time) bool {
 
 // ExhaustedAccount is the status snapshot used for the 429 body and /v1/accounts.
 type ExhaustedAccount struct {
-	Index    int               `json:"index"`
-	Label    string            `json:"label"`
-	AuthUser string            `json:"auth_user"`
-	Available bool             `json:"available"`
-	Tier     string            `json:"tier,omitempty"`
-	Used     float64           `json:"used"`
-	FiveHour *gemini.QuotaPool `json:"five_hour,omitempty"`
-	Weekly   *gemini.QuotaPool `json:"weekly,omitempty"`
-	ResetAt  *time.Time        `json:"reset_at,omitempty"`
-	CooldownUntil *time.Time   `json:"cooldown_until,omitempty"`
-	LastError string           `json:"last_error,omitempty"`
-	QuotaError string          `json:"quota_error,omitempty"`
+	Index         int               `json:"index"`
+	Label         string            `json:"label"`
+	AuthUser      string            `json:"auth_user"`
+	Available     bool              `json:"available"`
+	Tier          string            `json:"tier,omitempty"`
+	Used          float64           `json:"used"`
+	FiveHour      *gemini.QuotaPool `json:"five_hour,omitempty"`
+	Weekly        *gemini.QuotaPool `json:"weekly,omitempty"`
+	ResetAt       *time.Time        `json:"reset_at,omitempty"`
+	CooldownUntil *time.Time        `json:"cooldown_until,omitempty"`
+	LastError     string            `json:"last_error,omitempty"`
+	QuotaError    string            `json:"quota_error,omitempty"`
 }
 
 // ErrAllExhausted is returned when every account is over the usage threshold.
@@ -195,7 +200,10 @@ func NewPool(cfg config.Config, req gemini.Requester, logf func(format string, a
 		acctCfg.CookieFile = ac.CookieFile
 
 		client := gemini.NewClient(acctCfg)
-		client.HTTP = req
+		// NewClient already wrapped the requester in the cookie-rotation recorder;
+		// swapping in the shared requester here would drop that wrapper and the
+		// session would silently stop refreshing.
+		client.HTTP = gemini.NewRotatingRequester(req, client.Cookies)
 		client.FailFast = true
 
 		acct := &Account{
@@ -262,10 +270,10 @@ func (a *Account) Snapshot(threshold float64, now time.Time) ExhaustedAccount {
 	defer a.mu.RUnlock()
 
 	s := ExhaustedAccount{
-		Index:     a.Index,
-		Label:     a.Label,
-		AuthUser:  a.AuthUser,
-		LastError: a.lastErr,
+		Index:      a.Index,
+		Label:      a.Label,
+		AuthUser:   a.AuthUser,
+		LastError:  a.lastErr,
 		QuotaError: a.quotaErr,
 	}
 	if !a.exhaustedUntil.IsZero() && now.Before(a.exhaustedUntil) {
@@ -400,15 +408,48 @@ func (p *Pool) Close() {
 	p.stopOnce.Do(func() { close(p.stop) })
 }
 
+// xsrfRetryCooldown is how long a failed page-token fetch suppresses further
+// attempts. A dead session returns 302 on every try, so retrying per request
+// only floods the log without ever succeeding.
+const xsrfRetryCooldown = 10 * time.Minute
+
 // ensureXSRF makes sure the account carries a usable page token, fetching one on
 // first use. It is a no-op when the account already has a token.
+//
+// The token is optional for generation: when absent, BuildBody simply omits the
+// `at` field and upstream still answers. So a failed refresh must never block a
+// request — it is logged once and then backed off.
 func (p *Pool) ensureXSRF(a *Account) {
 	if a.XSRFToken() != "" || !p.cfg.AutoXSRF {
 		return
 	}
-	if err := p.RefreshXSRFToken(a); err != nil {
-		p.logf("account %s: xsrf refresh failed: %v", a.Label, err)
+
+	a.mu.RLock()
+	failedAt := a.xsrfFailedAt
+	reason := a.xsrfFailReason
+	a.mu.RUnlock()
+
+	if !failedAt.IsZero() && time.Since(failedAt) < xsrfRetryCooldown {
+		// Already failing recently; stay quiet until the cooldown expires.
+		_ = reason
+		return
 	}
+
+	if err := p.RefreshXSRFToken(a); err != nil {
+		a.mu.Lock()
+		a.xsrfFailedAt = time.Now()
+		a.xsrfFailReason = err.Error()
+		a.mu.Unlock()
+		p.logf("account %s: xsrf refresh failed (%v); will retry in %s. "+
+			"Generation still works without the token, but a 302 on /app usually means the cookie needs re-exporting",
+			a.Label, err, xsrfRetryCooldown)
+		return
+	}
+
+	a.mu.Lock()
+	a.xsrfFailedAt = time.Time{}
+	a.xsrfFailReason = ""
+	a.mu.Unlock()
 }
 
 // uploadFor uploads the request images through one specific account.

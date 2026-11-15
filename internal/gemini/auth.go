@@ -28,6 +28,11 @@ type CookieCache struct {
 	file  string
 	mtime time.Time
 	info  CookieInfo
+
+	// jar mirrors the live cookie string. Google rotates SIDCC/PSIDTS on an
+	// ordinary request, so replaying those Set-Cookie headers is what keeps a
+	// static export from decaying within the hour.
+	jar *cookieJar
 }
 
 func NewCookieCache(file string) *CookieCache {
@@ -116,7 +121,128 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 		GeminiBL:  geminiBL,
 	}
 
+	// Rebuild the jar from the file on every reload so an operator editing the
+	// file by hand still wins over anything the service had accumulated.
+	if c.jar == nil {
+		c.jar = newCookieJar(cookieStr)
+		c.jar.onFlush = c.persistJar
+	} else {
+		c.jar = newCookieJar(cookieStr)
+		c.jar.onFlush = c.persistJar
+	}
+
 	return c.info, nil
+}
+
+// Current returns the live cookie header value, which includes any rotations the
+// server has applied since the file was read.
+func (c *CookieCache) Current() string {
+	c.mu.Lock()
+	jar := c.jar
+	info := c.info
+	c.mu.Unlock()
+
+	if jar != nil {
+		if s := jar.String(); s != "" {
+			return s
+		}
+	}
+	return info.Cookie
+}
+
+// noteResponse feeds a response's Set-Cookie headers into the live jar.
+func (c *CookieCache) noteResponse(resp *http.Response) {
+	c.mu.Lock()
+	jar := c.jar
+	if jar == nil && c.info.Cookie != "" {
+		jar = newCookieJar(c.info.Cookie)
+		jar.onFlush = c.persistJar
+		c.jar = jar
+	}
+	c.mu.Unlock()
+
+	if jar != nil {
+		jar.applySetCookie(resp)
+	}
+}
+
+// persistJar writes the rotated cookie string back to the file so a restart
+// picks up where it left off.
+func (c *CookieCache) persistJar(raw string) {
+	if c.file == "" || raw == "" {
+		return
+	}
+
+	c.mu.Lock()
+	info := c.info
+	info.Cookie = raw
+	c.info = info
+	file := c.file
+	c.mu.Unlock()
+
+	payload := struct {
+		Cookie    string  `json:"cookie"`
+		SAPISID   string  `json:"sapisid"`
+		AuthUser  *string `json:"auth_user"`
+		XSRFToken *string `json:"xsrf_token"`
+		GeminiBL  *string `json:"gemini_bl"`
+	}{
+		Cookie:  raw,
+		SAPISID: info.SAPISID,
+	}
+	if info.AuthUser != "" {
+		v := info.AuthUser
+		payload.AuthUser = &v
+	}
+	if info.XSRFToken != "" {
+		v := info.XSRFToken
+		payload.XSRFToken = &v
+	}
+	if info.GeminiBL != "" {
+		v := info.GeminiBL
+		payload.GeminiBL = &v
+	}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		log.Printf("cookie rotate: marshal failed: %v", err)
+		return
+	}
+
+	tmp := file + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		log.Printf("cookie rotate: write failed: %v", err)
+		return
+	}
+	// WriteFile only applies the mode when creating; an existing temp file keeps
+	// its old permissions, and on some platforms the mode is ignored entirely.
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		log.Printf("cookie rotate: chmod failed: %v", err)
+	}
+	if err := os.Rename(tmp, file); err != nil {
+		_ = os.Remove(tmp)
+		log.Printf("cookie rotate: rename failed: %v", err)
+		return
+	}
+	_ = os.Chmod(file, 0o600)
+	// Keep the cached mtime in sync so the next Load does not re-read and clobber
+	// the rotation we just persisted.
+	if st, err := os.Stat(file); err == nil {
+		c.mu.Lock()
+		c.mtime = st.ModTime()
+		c.mu.Unlock()
+	}
+}
+
+// JarStats reports rotations applied so far, for logging.
+func (c *CookieCache) JarStats() (updates, names int) {
+	c.mu.Lock()
+	jar := c.jar
+	c.mu.Unlock()
+	if jar == nil {
+		return 0, 0
+	}
+	return jar.Stats()
 }
 
 func SAPISIDHash(sapisid string) string {
