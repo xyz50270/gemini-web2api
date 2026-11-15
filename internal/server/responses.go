@@ -93,29 +93,35 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		convPrefix = convHistory[:len(convHistory)-1]
 	}
 
-	var convMeta []any
-	var convKey string
-	var convHit bool
-	if prevID, _ := req["previous_response_id"].(string); prevID != "" && a.Pool.convs != nil {
-		if rec, ok := a.Pool.convs.GetByResponseID(prevID); ok && len(rec.Metadata) > 0 && rec.Model == conv.NormalizeModel(modelStr) {
-			convMeta = rec.Metadata
-			convHit = true
-			a.Logf("conv hit via previous_response_id %s", prevID)
-		}
-	}
-	if !convHit {
-		convMeta, convKey, convHit = a.resolveConv(modelStr, convPrefix)
-	}
-
-	prompt, images, err := format.MessagesToPrompt(chatReq)
-	if convHit {
-		prompt = lastMessageText(reqMessages)
-		images = nil
-	}
-	if err != nil || strings.TrimSpace(prompt) == "" {
+	fullPrompt, images, err := format.MessagesToPrompt(chatReq)
+	if err != nil || strings.TrimSpace(fullPrompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty input"}})
 		return
 	}
+	prevID, _ := req["previous_response_id"].(string)
+	lastPrompt := lastMessageText(reqMessages)
+	var convKey string
+	var convHit bool
+
+	// Resolved once an account is chosen: a conversation id may only be replayed
+	// on the cookie that created it.
+	resolve := func(account string) ([]any, string, string) {
+		if prevID != "" && a.Pool.convs != nil {
+			if rec, ok := a.Pool.convs.GetByResponseID(prevID); ok && len(rec.Metadata) > 0 &&
+				rec.Model == conv.NormalizeModel(modelStr) && rec.Account == account {
+				convHit = true
+				a.Logf("conv hit via previous_response_id %s (account %s)", prevID, account)
+				return rec.Metadata, lastPrompt, rec.Key
+			}
+		}
+		meta, key, hit := a.resolveConv(modelStr, convPrefix, account)
+		if !hit {
+			return nil, fullPrompt, key
+		}
+		convKey, convHit = key, true
+		return meta, lastPrompt, key
+	}
+
 
 	// Image upload is performed inside the pool against the account that
 	// actually serves the request.
@@ -127,7 +133,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		Extra:       resolved.Extra,
 	}
 
-	text, genMeta, err := a.Pool.Generate(r.Context(), prompt, gemOpt, images, convMeta)
+	text, genMeta, err := a.Pool.GenerateWithConv(r.Context(), fullPrompt, gemOpt, images, resolve)
 	if err != nil {
 		if convHit && gemini.IsCredentialError(err) {
 			a.invalidateConv(convKey)
@@ -160,7 +166,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	outputItems := format.BuildResponseOutput(text, toolCalls, mid)
 
 	stream, _ := req["stream"].(bool)
-	promptTokens := len(prompt) / 4
+	promptTokens := len(fullPrompt) / 4
 	outputTokens := len(text) / 4
 
 	if stream {

@@ -62,16 +62,17 @@ func flattenContent(content any) string {
 	}
 }
 
-// resolveConv looks up a cached conversation handle for this request.
+// resolveConv looks up a cached conversation handle for one account.
 //
-// The model is part of the key, so switching model always misses and falls back
-// to a full-history send. That is deliberate: upstream rejects a chat continued
-// under a different model, and starting a fresh chat with the history preserved
-// is the behaviour that keeps working.
+// Two things must match:
 //
-// It returns the metadata to continue with (nil for a new conversation) and the
-// lookup key so the caller can report/invalidate it.
-func (a *App) resolveConv(model string, history []conv.Msg) (meta []any, key string, hit bool) {
+//  1. Model. Gemini rejects a chat continued under a different model, so the
+//     model is part of the key.
+//  2. Account. A conversation id is scoped to the cookie that created it. The
+//     pool moves between accounts as quota shifts, so replaying a handle on a
+//     different account would fail upstream (or, worse, be silently refused).
+//     Matching on account keeps the chat pinned to whoever created it.
+func (a *App) resolveConv(model string, history []conv.Msg, account string) (meta []any, key string, hit bool) {
 	if a.Pool == nil || a.Pool.convs == nil || len(history) == 0 {
 		return nil, "", false
 	}
@@ -82,6 +83,11 @@ func (a *App) resolveConv(model string, history []conv.Msg) (meta []any, key str
 		return nil, key, false
 	}
 	if rec.Model != conv.NormalizeModel(model) {
+		return nil, key, false
+	}
+	if rec.Account != account {
+		a.Logf("conv skip %s: cached on account %q, serving account %q",
+			conv.Fingerprint(key), rec.Account, account)
 		return nil, key, false
 	}
 

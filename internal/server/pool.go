@@ -652,3 +652,197 @@ func (p *Pool) LimiterStats() (inflight, waiting int) {
 	}
 	return p.limiter.Stats()
 }
+
+// ConvResolver decides, once an account is chosen, whether a cached
+// conversation handle may be replayed on that account.
+//
+// It has to be a callback rather than a lookup done by the handler: the account
+// that will serve the request is only known after Pick(), and a conversation id
+// is only reusable on the cookie that created it.
+//
+// It returns the metadata to continue with (nil for a fresh chat), the prompt to
+// send, and an invalidation key for the cache entry.
+type ConvResolver func(account string) (convMeta []any, prompt string, convKey string)
+
+// GenerateWithConv is Generate with per-account conversation resolution.
+func (p *Pool) GenerateWithConv(ctx context.Context, fullPrompt string, opt gemini.ModelOptions, images []format.Image, resolve ConvResolver) (string, *gemini.ConversationMeta, error) {
+	if resolve == nil {
+		return p.Generate(ctx, fullPrompt, opt, images, nil)
+	}
+	if err := p.limiter.Acquire(ctx); err != nil {
+		return "", nil, err
+	}
+	defer p.limiter.Release()
+
+	text, meta, err := p.generateWithConv(fullPrompt, opt, images, resolve)
+	if err == nil || !gemini.IsCredentialError(err) {
+		return text, meta, err
+	}
+	p.logf("conversation handle rejected (%v); retrying as a new conversation", err)
+	return p.generateOnce(fullPrompt, opt, images, nil)
+}
+
+func (p *Pool) generateWithConv(fullPrompt string, opt gemini.ModelOptions, images []format.Image, resolve ConvResolver) (string, *gemini.ConversationMeta, error) {
+	tried := make(map[int]bool)
+	var lastErr error
+
+	for len(tried) < len(p.accounts) {
+		acct, err := p.Pick(tried)
+		if err != nil {
+			if lastErr != nil {
+				return "", nil, lastErr
+			}
+			return "", nil, err
+		}
+		tried[acct.Index] = true
+
+		convMeta, prompt, _ := resolve(acct.AuthUser)
+		p.ensureXSRF(acct)
+
+		fileRefs, err := p.uploadFor(acct, images)
+		if err != nil {
+			acct.recordErr(err)
+			lastErr = fmt.Errorf("account %s: image upload failed: %w", acct.Label, err)
+			continue
+		}
+
+		text, meta, err := acct.Client.Generate(prompt, opt, fileRefs, convMeta)
+		if err == nil {
+			acct.recordErr(nil)
+			acct.recordUse()
+			if meta != nil {
+				meta.Account = acct.AuthUser
+			}
+			return text, meta, nil
+		}
+
+		lastErr = err
+		if gemini.IsQuotaError(err) {
+			p.MarkExhausted(acct, err)
+			continue
+		}
+		if gemini.IsCredentialError(err) {
+			acct.recordErr(err)
+			if p.cfg.AutoXSRF {
+				if rerr := p.RefreshXSRFToken(acct); rerr == nil {
+					if text, meta, rerr := acct.Client.Generate(prompt, opt, fileRefs, convMeta); rerr == nil {
+						acct.recordErr(nil)
+						acct.recordUse()
+						if meta != nil {
+							meta.Account = acct.AuthUser
+						}
+						return text, meta, nil
+					}
+				}
+			}
+			continue
+		}
+		return "", nil, err
+	}
+
+	if lastErr != nil {
+		return "", nil, lastErr
+	}
+	return "", nil, p.exhaustedError(time.Now())
+}
+
+// GenerateStreamWithConv is GenerateStream with per-account conversation
+// resolution. It returns the resolved account label so the caller can tag the
+// cache entry correctly.
+func (p *Pool) GenerateStreamWithConv(ctx context.Context, fullPrompt string, opt gemini.ModelOptions, images []format.Image, resolve ConvResolver, emit func(string) error) (*gemini.ConversationMeta, error) {
+	if resolve == nil {
+		return p.GenerateStream(ctx, fullPrompt, opt, images, nil, emit)
+	}
+	if err := p.limiter.Acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer p.limiter.Release()
+
+	meta, err := p.generateStreamWithConv(fullPrompt, opt, images, resolve, emit)
+	if err == nil || !gemini.IsCredentialError(err) {
+		return meta, err
+	}
+	p.logf("conversation handle rejected (%v); retrying stream as a new conversation", err)
+	return p.generateStreamOnce(fullPrompt, opt, images, nil, emit)
+}
+
+func (p *Pool) generateStreamWithConv(fullPrompt string, opt gemini.ModelOptions, images []format.Image, resolve ConvResolver, emit func(string) error) (*gemini.ConversationMeta, error) {
+	tried := make(map[int]bool)
+	var lastErr error
+
+	for len(tried) < len(p.accounts) {
+		acct, err := p.Pick(tried)
+		if err != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, err
+		}
+		tried[acct.Index] = true
+
+		convMeta, prompt, _ := resolve(acct.AuthUser)
+		p.ensureXSRF(acct)
+
+		fileRefs, err := p.uploadFor(acct, images)
+		if err != nil {
+			acct.recordErr(err)
+			lastErr = fmt.Errorf("account %s: image upload failed: %w", acct.Label, err)
+			continue
+		}
+
+		emitted := false
+		tracked := func(delta string) error {
+			emitted = true
+			return emit(delta)
+		}
+
+		meta, err := acct.Client.GenerateStream(prompt, opt, fileRefs, convMeta, tracked)
+		if err == nil {
+			acct.recordErr(nil)
+			acct.recordUse()
+			if meta != nil {
+				meta.Account = acct.AuthUser
+			}
+			return meta, nil
+		}
+		if emitted {
+			acct.recordErr(err)
+			return nil, err
+		}
+
+		lastErr = err
+		if gemini.IsQuotaError(err) {
+			p.MarkExhausted(acct, err)
+			continue
+		}
+		if gemini.IsCredentialError(err) {
+			acct.recordErr(err)
+			if p.cfg.AutoXSRF {
+				if rerr := p.RefreshXSRFToken(acct); rerr == nil {
+					emitted = false
+					meta, err = acct.Client.GenerateStream(prompt, opt, fileRefs, convMeta, tracked)
+					if err == nil {
+						acct.recordErr(nil)
+						acct.recordUse()
+						if meta != nil {
+							meta.Account = acct.AuthUser
+						}
+						return meta, nil
+					}
+					if emitted {
+						acct.recordErr(err)
+						return nil, err
+					}
+					lastErr = err
+				}
+			}
+			continue
+		}
+		return nil, err
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, p.exhaustedError(time.Now())
+}

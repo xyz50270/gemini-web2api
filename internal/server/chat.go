@@ -51,17 +51,26 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		convPrefix = convHistory[:len(convHistory)-1]
 	}
 
-	convMeta, convKey, convHit := a.resolveConv(modelStr, convPrefix)
-
-	prompt, images, err := format.MessagesToPrompt(req)
-	if convHit {
-		// Upstream already holds the history, so only the new message is needed.
-		prompt = lastMessageText(req.Messages)
-		images = nil
-	}
-	if err != nil || strings.TrimSpace(prompt) == "" {
+	fullPrompt, images, err := format.MessagesToPrompt(req)
+	if err != nil || strings.TrimSpace(fullPrompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty prompt"}})
 		return
+	}
+
+	// The account is only known once the pool picks one, and a conversation id is
+	// only reusable on the account that created it, so the cache lookup happens
+	// inside the pool callback rather than here.
+	lastPrompt := lastMessageText(req.Messages)
+	var convKey string
+	var convHit bool
+	resolve := func(account string) ([]any, string, string) {
+		meta, key, hit := a.resolveConv(modelStr, convPrefix, account)
+		if !hit {
+			return nil, fullPrompt, key
+		}
+		convKey, convHit = key, true
+		// Upstream already holds the history, so only the new message is needed.
+		return meta, lastPrompt, key
 	}
 
 	// Image upload happens inside the pool, against whichever account serves
@@ -104,7 +113,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var fullText string
-		streamMeta, emitErr := a.Pool.GenerateStream(r.Context(), prompt, gemOpt, promptImages, convMeta, func(delta string) error {
+		streamMeta, emitErr := a.Pool.GenerateStreamWithConv(r.Context(), fullPrompt, gemOpt, promptImages, resolve, func(delta string) error {
 			if !started {
 				started = true
 				if !startSSE(w) {
@@ -182,7 +191,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text, genMeta, err := a.Pool.Generate(r.Context(), prompt, gemOpt, promptImages, convMeta)
+	text, genMeta, err := a.Pool.GenerateWithConv(r.Context(), fullPrompt, gemOpt, promptImages, resolve)
 	if err != nil {
 		if convHit && gemini.IsCredentialError(err) {
 			a.invalidateConv(convKey)
@@ -240,7 +249,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		_ = writeSSEData(w, chunk)
 		_ = writeSSEDone(w)
 	} else {
-		promptTokens := len(prompt) / 4
+		promptTokens := len(fullPrompt) / 4
 		completionTokens := len(text) / 4
 		resp := models.OpenAIChatResponse{
 			ID:      cid,

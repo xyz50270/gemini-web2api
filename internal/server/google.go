@@ -71,19 +71,25 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	if len(convHistory) > 0 {
 		convPrefix = convHistory[:len(convHistory)-1]
 	}
-	convMeta, convKey, convHit := a.resolveConv(modelName, convPrefix)
-
-	prompt, images, err := format.GoogleContentsToPrompt(req)
-	if err != nil || len(prompt) == 0 {
+	fullPrompt, images, err := format.GoogleContentsToPrompt(req)
+	if err != nil || len(fullPrompt) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty content"}})
 		return
 	}
-	if convHit {
-		prompt = lastGooglePartText(req)
-		images = nil
+
+	lastPrompt := lastGooglePartText(req)
+	var convKey string
+	var convHit bool
+	resolve := func(account string) ([]any, string, string) {
+		meta, key, hit := a.resolveConv(modelName, convPrefix, account)
+		if !hit {
+			return nil, fullPrompt, key
+		}
+		convKey, convHit = key, true
+		return meta, lastPrompt, key
 	}
 
-	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d", resolved.Name, stream, hasTools, len(prompt), len(images))
+	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d", resolved.Name, stream, hasTools, len(fullPrompt), len(images))
 
 	gemOpt := gemini.ModelOptions{
 		ModelName:   resolved.Name,
@@ -98,7 +104,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		started := false
 
 		var fullText string
-		streamMeta, emitErr := a.Pool.GenerateStream(r.Context(), prompt, gemOpt, images, convMeta, func(delta string) error {
+		streamMeta, emitErr := a.Pool.GenerateStreamWithConv(r.Context(), fullPrompt, gemOpt, images, resolve, func(delta string) error {
 			if delta == "" {
 				return nil
 			}
@@ -136,7 +142,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			promptTokens := len(prompt) / 4
+			promptTokens := len(fullPrompt) / 4
 			candidatesTokens := len(fullText) / 4
 			finalChunk := models.GoogleGenerateResponse{
 				Candidates: []models.GoogleCandidate{
@@ -172,7 +178,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text, genMeta, err := a.Pool.Generate(r.Context(), prompt, gemOpt, images, convMeta)
+	text, genMeta, err := a.Pool.GenerateWithConv(r.Context(), fullPrompt, gemOpt, images, resolve)
 	if err != nil {
 		if convHit && gemini.IsCredentialError(err) {
 			a.invalidateConv(convKey)
@@ -214,7 +220,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		responseParts = append(responseParts, models.GooglePart{Text: fallbackText})
 	}
 
-	promptTokens := len(prompt) / 4
+	promptTokens := len(fullPrompt) / 4
 	candidatesTokens := len(text) / 4
 
 	responseObj := models.GoogleGenerateResponse{

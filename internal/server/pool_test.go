@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/config"
+	"github.com/ikhsan3adi/gemini-web2api/internal/conv"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
+	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
 // stubRequester answers every request with a canned body/status so pool logic
@@ -496,5 +498,99 @@ func TestSnapshotRendering(t *testing.T) {
 	snap1 := p.accounts[1].Snapshot(0.9, time.Now())
 	if !snap1.Available {
 		t.Error("account with no quota data should be available")
+	}
+}
+
+// A conversation handle is scoped to the cookie that created it, so it must not
+// be replayed after the pool moves to another account.
+func TestConvAccountBinding(t *testing.T) {
+	cfg := poolConfig(0.95, "0", "1")
+	cfg.LogRequests = false
+	app := New(cfg, "test")
+
+	store, err := conv.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Pool.convs = store
+
+	hist := []conv.Msg{{Role: "user", Content: "hi"}}
+	key := conv.HistoryKey("gemini-4-hydrogen", hist)
+	store.Put(&conv.Record{
+		Key:      key,
+		Model:    conv.NormalizeModel("gemini-4-hydrogen"),
+		Account:  "0",
+		Metadata: []any{"c_1", "r_1"},
+	})
+
+	if _, _, hit := app.resolveConv("gemini-4-hydrogen", hist, "0"); !hit {
+		t.Error("the creating account must reuse its own handle")
+	}
+	if _, _, hit := app.resolveConv("gemini-4-hydrogen", hist, "1"); hit {
+		t.Error("another account must not replay a foreign conversation id")
+	}
+}
+
+// The resolver callback is what the pool calls per candidate account; it must
+// return the full prompt on a miss and the short prompt on a hit.
+func TestConvResolverPromptSelection(t *testing.T) {
+	cfg := poolConfig(0.95, "0")
+	cfg.LogRequests = false
+	app := New(cfg, "test")
+
+	store, _ := conv.Open("")
+	app.Pool.convs = store
+
+	msgs := []models.OpenAIMessage{
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "reply"},
+		{Role: "user", Content: "second"},
+	}
+	history := chatMessagesToConvMsgs(msgs)
+	prefix := history[:len(history)-1]
+
+	full := "FULL-HISTORY-PROMPT"
+	last := lastMessageText(msgs)
+	if last != "second" {
+		t.Fatalf("lastMessageText = %q", last)
+	}
+
+	var convKey string
+	var convHit bool
+	resolve := func(account string) ([]any, string, string) {
+		meta, key, hit := app.resolveConv("gemini-4-hydrogen", prefix, account)
+		if !hit {
+			return nil, full, key
+		}
+		convKey, convHit = key, true
+		return meta, last, key
+	}
+
+	// Miss: full prompt, no metadata.
+	meta, prompt, _ := resolve("0")
+	if meta != nil {
+		t.Errorf("miss should not return metadata, got %v", meta)
+	}
+	if prompt != full {
+		t.Errorf("miss prompt = %q, want the full history", prompt)
+	}
+	if convHit {
+		t.Error("convHit should be false on a miss")
+	}
+
+	// Now cache a handle and expect the short prompt.
+	key := conv.HistoryKey("gemini-4-hydrogen", prefix)
+	store.Put(&conv.Record{Key: key, Model: conv.NormalizeModel("gemini-4-hydrogen"),
+		Account: "0", Metadata: []any{"c_1", "r_1"}})
+
+	meta, prompt, keyOut := resolve("0")
+	if len(meta) != 2 {
+		t.Errorf("hit should return metadata, got %v", meta)
+	}
+	if prompt != last {
+		t.Errorf("hit prompt = %q, want only the new message", prompt)
+	}
+	if !convHit || convKey == "" || keyOut == "" {
+		t.Error("hit should be recorded")
 	}
 }
