@@ -34,12 +34,16 @@ func applyPersistenceFlags(inner []any, cfg config.Config) {
 // BuildBody constructs the form-encoded payload (`f.req`) expected by Gemini's frontend RPC endpoint.
 // Gemini web uses a sparse JSON array (102 elements) where specific indices represent payload parameters:
 // - Index 0: Prompt text and image attachment references
+// - Index 2: Conversation metadata (continues an existing chat; empty starts a new one)
 // - Index 17: Reasoning/thinking mode depth
 // - Index 41: Persistence/temporary chat mode (1=temporary, 2=persistent)
 // - Index 45: Additional persistence flag (1 when temporary)
 // - Index 59: Request UUID
 // - Index 79: Target model mode ID
-func BuildBody(prompt string, modelID, thinkMode int, fileRefs []string, extra map[int]any, cfg config.Config) string {
+//
+// conv is the metadata from a previous response. When nil the request starts a
+// fresh conversation.
+func BuildBody(prompt string, modelID, thinkMode int, fileRefs []string, extra map[int]any, cfg config.Config, conv []any) string {
 	inner := make([]any, GeminiPayloadSize)
 
 	if len(fileRefs) > 0 {
@@ -53,7 +57,11 @@ func BuildBody(prompt string, modelID, thinkMode int, fileRefs []string, extra m
 	}
 
 	inner[1] = []any{"en"}
-	inner[2] = []any{"", "", "", nil, nil, nil, nil, nil, nil, ""}
+	if len(conv) > 0 {
+		inner[2] = conv
+	} else {
+		inner[2] = []any{"", "", "", nil, nil, nil, nil, nil, nil, ""}
+	}
 	inner[6] = []any{0}
 	inner[7] = 1
 	inner[10] = 1

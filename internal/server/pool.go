@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ikhsan3adi/gemini-web2api/internal/conv"
+
 	"github.com/ikhsan3adi/gemini-web2api/internal/config"
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
@@ -153,6 +155,14 @@ type Pool struct {
 	req      gemini.Requester
 	logf     func(format string, args ...any)
 
+	// limiter serialises upstream generation across all accounts. Google's
+	// anti-abuse heuristics expect one in-flight generation at a time; letting
+	// several run concurrently is the main thing that gets an egress IP flagged.
+	limiter *Limiter
+
+	// convs caches the server-side conversation handles. Nil disables reuse.
+	convs *conv.Store
+
 	stopOnce sync.Once
 	stop     chan struct{}
 }
@@ -168,10 +178,11 @@ func NewPool(cfg config.Config, req gemini.Requester, logf func(format string, a
 
 	resolved := cfg.ResolvedAccounts()
 	p := &Pool{
-		cfg:  cfg,
-		req:  req,
-		logf: logf,
-		stop: make(chan struct{}),
+		cfg:     cfg,
+		req:     req,
+		logf:    logf,
+		limiter: NewLimiter(cfg.MaxConcurrent),
+		stop:    make(chan struct{}),
 	}
 
 	httpClient := createHTTPClient(cfg)
@@ -408,7 +419,30 @@ func (p *Pool) uploadFor(a *Account, images []format.Image) ([]string, error) {
 }
 
 // Generate runs a non-streaming completion with account failover.
-func (p *Pool) Generate(prompt string, opt gemini.ModelOptions, images []format.Image) (string, error) {
+//
+// conv continues an existing upstream conversation; on success the returned meta
+// is what the caller should cache for the next turn. The admission limiter wraps
+// the whole failover loop, so retries and account switches never overlap another
+// request.
+func (p *Pool) Generate(ctx context.Context, prompt string, opt gemini.ModelOptions, images []format.Image, convMeta []any) (string, *gemini.ConversationMeta, error) {
+	if err := p.limiter.Acquire(ctx); err != nil {
+		return "", nil, err
+	}
+	defer p.limiter.Release()
+
+	text, meta, err := p.generateOnce(prompt, opt, images, convMeta)
+	if err == nil || convMeta == nil || !gemini.IsCredentialError(err) {
+		return text, meta, err
+	}
+
+	// The cached conversation handle was rejected. Drop it and retry once from
+	// scratch with the full history, so a stale or incompatible cid degrades to
+	// a fresh conversation instead of surfacing an error.
+	p.logf("conversation handle rejected (%v); retrying as a new conversation", err)
+	return p.generateOnce(prompt, opt, images, nil)
+}
+
+func (p *Pool) generateOnce(prompt string, opt gemini.ModelOptions, images []format.Image, convMeta []any) (string, *gemini.ConversationMeta, error) {
 	tried := make(map[int]bool)
 	var lastErr error
 
@@ -416,9 +450,9 @@ func (p *Pool) Generate(prompt string, opt gemini.ModelOptions, images []format.
 		acct, err := p.Pick(tried)
 		if err != nil {
 			if lastErr != nil {
-				return "", lastErr
+				return "", nil, lastErr
 			}
-			return "", err
+			return "", nil, err
 		}
 		tried[acct.Index] = true
 
@@ -431,11 +465,14 @@ func (p *Pool) Generate(prompt string, opt gemini.ModelOptions, images []format.
 			continue
 		}
 
-		text, err := acct.Client.Generate(prompt, opt, fileRefs)
+		text, meta, err := acct.Client.Generate(prompt, opt, fileRefs, convMeta)
 		if err == nil {
 			acct.recordErr(nil)
 			acct.recordUse()
-			return text, nil
+			if meta != nil {
+				meta.Account = acct.AuthUser
+			}
+			return text, meta, nil
 		}
 
 		lastErr = err
@@ -444,33 +481,49 @@ func (p *Pool) Generate(prompt string, opt gemini.ModelOptions, images []format.
 			continue
 		}
 		if gemini.IsCredentialError(err) {
-			// The page token expires; refresh once and let the next account (or
-			// this one, on the caller's retry) use the new value.
 			acct.recordErr(err)
 			if p.cfg.AutoXSRF {
 				if rerr := p.RefreshXSRFToken(acct); rerr == nil {
-					if text, rerr := acct.Client.Generate(prompt, opt, fileRefs); rerr == nil {
+					if text, meta, rerr := acct.Client.Generate(prompt, opt, fileRefs, convMeta); rerr == nil {
 						acct.recordErr(nil)
 						acct.recordUse()
-						return text, nil
+						if meta != nil {
+							meta.Account = acct.AuthUser
+						}
+						return text, meta, nil
 					}
 				}
 			}
 			continue
 		}
-		return "", err
+		return "", nil, err
 	}
 
 	if lastErr != nil {
-		return "", lastErr
+		return "", nil, lastErr
 	}
-	return "", p.exhaustedError(time.Now())
+	return "", nil, p.exhaustedError(time.Now())
 }
 
 // GenerateStream runs a streaming completion with account failover. Failover is
 // only attempted while nothing has been emitted to the client: once a delta is
 // out, the stream is committed and the error is returned as-is.
-func (p *Pool) GenerateStream(prompt string, opt gemini.ModelOptions, images []format.Image, emit func(string) error) error {
+func (p *Pool) GenerateStream(ctx context.Context, prompt string, opt gemini.ModelOptions, images []format.Image, convMeta []any, emit func(string) error) (*gemini.ConversationMeta, error) {
+	if err := p.limiter.Acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer p.limiter.Release()
+
+	meta, err := p.generateStreamOnce(prompt, opt, images, convMeta, emit)
+	if err == nil || convMeta == nil || !gemini.IsCredentialError(err) {
+		return meta, err
+	}
+
+	p.logf("conversation handle rejected (%v); retrying stream as a new conversation", err)
+	return p.generateStreamOnce(prompt, opt, images, nil, emit)
+}
+
+func (p *Pool) generateStreamOnce(prompt string, opt gemini.ModelOptions, images []format.Image, convMeta []any, emit func(string) error) (*gemini.ConversationMeta, error) {
 	tried := make(map[int]bool)
 	var lastErr error
 
@@ -478,9 +531,9 @@ func (p *Pool) GenerateStream(prompt string, opt gemini.ModelOptions, images []f
 		acct, err := p.Pick(tried)
 		if err != nil {
 			if lastErr != nil {
-				return lastErr
+				return nil, lastErr
 			}
-			return err
+			return nil, err
 		}
 		tried[acct.Index] = true
 
@@ -499,17 +552,20 @@ func (p *Pool) GenerateStream(prompt string, opt gemini.ModelOptions, images []f
 			return emit(delta)
 		}
 
-		err = acct.Client.GenerateStream(prompt, opt, fileRefs, tracked)
+		meta, err := acct.Client.GenerateStream(prompt, opt, fileRefs, convMeta, tracked)
 		if err == nil {
 			acct.recordErr(nil)
 			acct.recordUse()
-			return nil
+			if meta != nil {
+				meta.Account = acct.AuthUser
+			}
+			return meta, nil
 		}
 		if emitted {
 			// Client already has partial output; a different account would
 			// restart the text, so surface the error instead.
 			acct.recordErr(err)
-			return err
+			return nil, err
 		}
 
 		lastErr = err
@@ -522,28 +578,31 @@ func (p *Pool) GenerateStream(prompt string, opt gemini.ModelOptions, images []f
 			if p.cfg.AutoXSRF {
 				if rerr := p.RefreshXSRFToken(acct); rerr == nil {
 					emitted = false
-					err = acct.Client.GenerateStream(prompt, opt, fileRefs, tracked)
+					meta, err = acct.Client.GenerateStream(prompt, opt, fileRefs, convMeta, tracked)
 					if err == nil {
 						acct.recordErr(nil)
 						acct.recordUse()
-						return nil
+						if meta != nil {
+							meta.Account = acct.AuthUser
+						}
+						return meta, nil
 					}
 					if emitted {
 						acct.recordErr(err)
-						return err
+						return nil, err
 					}
 					lastErr = err
 				}
 			}
 			continue
 		}
-		return err
+		return nil, err
 	}
 
 	if lastErr != nil {
-		return lastErr
+		return nil, lastErr
 	}
-	return p.exhaustedError(time.Now())
+	return nil, p.exhaustedError(time.Now())
 }
 
 // IsAllExhausted reports whether err means the pool had nothing to serve with.
@@ -567,4 +626,29 @@ func writeExhaustedJSON(w http.ResponseWriter, err error) bool {
 		},
 	})
 	return true
+}
+
+// CloseConversations flushes and stops the conversation cache.
+func (p *Pool) CloseConversations() {
+	if p.convs != nil {
+		if err := p.convs.Close(); err != nil {
+			p.logf("conversation cache flush failed: %v", err)
+		}
+	}
+}
+
+// ConversationStats reports cache size for the status endpoint.
+func (p *Pool) ConversationStats() (entries int, enabled bool) {
+	if p.convs == nil {
+		return 0, false
+	}
+	return p.convs.Len(), true
+}
+
+// LimiterStats exposes the admission counters.
+func (p *Pool) LimiterStats() (inflight, waiting int) {
+	if p.limiter == nil {
+		return 0, 0
+	}
+	return p.limiter.Stats()
 }

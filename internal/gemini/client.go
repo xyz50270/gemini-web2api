@@ -201,7 +201,10 @@ func (c *Client) triageStatus(resp *http.Response) error {
 	return nil
 }
 
-func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (string, error) {
+// Generate runs a non-streaming completion. conv continues an existing
+// conversation when non-nil; the returned meta is what a later turn should pass
+// back as conv.
+func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string, conv []any) (string, *ConversationMeta, error) {
 	c.EnsureModelsDiscovered()
 
 	cookieInfo, _ := c.Cookies.Load()
@@ -221,7 +224,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 	extra[59] = reqUUID
 
 	modelHdr, effectiveMode := c.resolveModelHeader(opt, reqUUID)
-	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, conv)
 	reqURL := BuildURL(cfg, c.CurrentBL())
 	headers := c.buildHeaders()
 	headers.Set(HeaderUUIDJspb, fmt.Sprintf(`["%s",1]`, reqUUID))
@@ -233,11 +236,12 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 
 	blRefreshed := false
 	var lastErr error
+	var meta ConversationMeta
 
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
 		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		req.Header = headers.Clone()
 
@@ -261,7 +265,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 					} else {
 						c.Logf("BL unchanged (%s), retrying request once anyway", newBL)
 					}
-					bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+					bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, conv)
 					reqURL = BuildURL(cfg, c.CurrentBL())
 					attempt-- // retry without consuming an attempt
 					continue
@@ -270,7 +274,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 				// Hand credential/quota failures straight back to the pool so it
 				// can switch accounts instead of hammering this one.
 				if c.FailFast && (IsCredentialError(err) || IsQuotaError(err)) {
-					return "", err
+					return "", nil, err
 				}
 			} else {
 				rawBytes, err := io.ReadAll(resp.Body)
@@ -278,11 +282,11 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 				if err != nil {
 					lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 				} else {
-					text, err := ExtractResponseText(string(rawBytes))
+					text, err := ExtractResponseTextAndMeta(string(rawBytes), &meta)
 					if err != nil {
 						lastErr = &UpstreamError{Kind: "bard", Msg: err.Error()}
 					} else {
-						return text, nil
+						return text, &meta, nil
 					}
 				}
 			}
@@ -294,10 +298,10 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		}
 	}
 
-	return "", lastErr
+	return "", nil, lastErr
 }
 
-func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []string, emit func(string) error) error {
+func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []string, conv []any, emit func(string) error) (retMeta *ConversationMeta, retErr error) {
 	c.EnsureModelsDiscovered()
 
 	cookieInfo, _ := c.Cookies.Load()
@@ -317,7 +321,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 	extra[59] = reqUUID
 
 	modelHdr, effectiveMode := c.resolveModelHeader(opt, reqUUID)
-	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, conv)
 	reqURL := BuildURL(cfg, c.CurrentBL())
 	headers := c.buildHeaders()
 	headers.Set(HeaderUUIDJspb, fmt.Sprintf(`["%s",1]`, reqUUID))
@@ -336,7 +340,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 
 		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		req.Header = headers.Clone()
 
@@ -358,23 +362,23 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 					} else {
 						c.Logf("BL unchanged (%s), retrying stream request once anyway", newBL)
 					}
-					bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+					bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, conv)
 					reqURL = BuildURL(cfg, c.CurrentBL())
 					attempt-- // retry without consuming an attempt
 					continue
 				}
 				lastErr = err
 				if c.FailFast && (IsCredentialError(err) || IsQuotaError(err)) {
-					return err
+					return nil, err
 				}
 			} else {
 				err = c.streamAttempt(resp.Body, parser, emit)
 				_ = resp.Body.Close()
 				if err == nil {
-					return nil
+					return parser.Meta, nil
 				}
 				if isClientDisconnect(err) {
-					return err
+					return parser.Meta, err
 				}
 				lastErr = err
 			}
@@ -386,7 +390,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		}
 	}
 
-	return lastErr
+	return parser.Meta, lastErr
 }
 
 func (c *Client) streamAttempt(body io.Reader, parser *StreamParser, emit func(string) error) error {

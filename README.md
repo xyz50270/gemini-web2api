@@ -373,6 +373,44 @@ When every account is over the threshold, chat requests short-circuit with HTTP
 `429` and `code: "all_accounts_exhausted"`, listing each account's usage and reset
 time — no upstream request is made.
 
+### Conversation reuse
+
+Gemini issues a conversation handle with every reply, and sending it back at
+payload index 2 continues the same chat server-side. With `conv_cache` on
+(default) the proxy stores that handle and, from the second turn, sends only the
+new user message instead of the whole transcript.
+
+```json
+{
+  "max_concurrent": 1,
+  "conv_cache": true,
+  "conv_cache_ttl_days": 30,
+  "conv_cache_path": "/app/data/conversations.json"
+}
+```
+
+**How turns are matched.** The cache key is `sha256(model + history)`. After a
+turn completes the proxy stores the key of the history *including* the reply it
+returned; the next request's prefix is exactly that history, so the two line up
+and chaining works turn after turn.
+
+**Changing model.** The model is part of the key, so a model switch always
+misses, opens a new upstream chat and resends the full history — which is
+exactly what upstream requires, since continuing a chat under another model
+returns `MODEL_INCONSISTENT`. The previous model's entry is left in place, so
+switching back reuses it.
+
+**Failures degrade quietly.** If upstream rejects a stored handle, the proxy
+drops that entry and retries once with the full history. A stale handle costs
+tokens, never correctness. If the cache file is corrupt it is moved aside and
+the service starts with an empty cache.
+
+`/v1/responses` additionally honours `previous_response_id`, which is a more
+precise signal than the history prefix.
+
+The cache never enables when `temporary_chats` is on: Gemini discards those
+chats server-side, so there is nothing to continue.
+
 `auto_xsrf` (default `true`) lets the service fetch each account's `SNlM0e` page
 token on startup and refresh it when a 400 indicates it went stale, so tokens do
 not need to be pasted by hand.
@@ -416,7 +454,15 @@ gemini-web2api.exe
 ## Limitations
 
 - **Not real Pro/Ultra**: Without a paid subscription cookie, `gemini-3.1-pro` routes to the same Flash model. The "Pro" label is a UI preference, not a backend model switch.
-- **Single-turn only**: Each request is an independent conversation. Multi-turn context is simulated by including previous messages in the prompt.
+- **Conversation reuse**: with `conv_cache` on, the proxy keeps Gemini's
+  server-side conversation handle and from the second turn only sends the new
+  message. The key includes the model, so switching model opens a fresh upstream
+  chat and resends the full history — this is required, because Gemini rejects a
+  conversation continued under a different model.
+- **One generation at a time**: `max_concurrent` defaults to 1 and requests queue
+  behind each other. A real browser never runs two generations for one account,
+  and mimicking that keeps the egress IP out of Google's abuse heuristics. A
+  queued stream waits for the previous one to finish entirely.
 - **Rate limits**: Google may throttle high-frequency requests. The server retries automatically but sustained heavy use may be blocked.
 
 ## License

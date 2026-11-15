@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ikhsan3adi/gemini-web2api/internal/conv"
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
@@ -63,10 +64,23 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 
 	hasTools := len(req.Tools) > 0 && fcMode != "NONE"
 
+	// Build the conversation prefix from all but the last content entry, mirroring
+	// the OpenAI path: the prefix identifies the chat, the tail is the new turn.
+	convHistory := googleContentsToConvMsgs(req)
+	var convPrefix []conv.Msg
+	if len(convHistory) > 0 {
+		convPrefix = convHistory[:len(convHistory)-1]
+	}
+	convMeta, convKey, convHit := a.resolveConv(modelName, convPrefix)
+
 	prompt, images, err := format.GoogleContentsToPrompt(req)
 	if err != nil || len(prompt) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty content"}})
 		return
+	}
+	if convHit {
+		prompt = lastGooglePartText(req)
+		images = nil
 	}
 
 	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d", resolved.Name, stream, hasTools, len(prompt), len(images))
@@ -84,7 +98,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		started := false
 
 		var fullText string
-		emitErr := a.Pool.GenerateStream(prompt, gemOpt, images, func(delta string) error {
+		streamMeta, emitErr := a.Pool.GenerateStream(r.Context(), prompt, gemOpt, images, convMeta, func(delta string) error {
 			if delta == "" {
 				return nil
 			}
@@ -139,6 +153,11 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 				ModelVersion: resolved.Name,
 			}
 			_ = writeSSEData(w, finalChunk)
+
+			if streamMeta != nil && streamMeta.Valid() {
+				full := append(convHistory, conv.Msg{Role: "model", Content: fullText})
+				a.storeConv(modelName, streamMeta.Account, full, streamMeta, "")
+			}
 			return
 		}
 
@@ -153,13 +172,20 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text, err := a.Pool.Generate(prompt, gemOpt, images)
+	text, genMeta, err := a.Pool.Generate(r.Context(), prompt, gemOpt, images, convMeta)
 	if err != nil {
+		if convHit && gemini.IsCredentialError(err) {
+			a.invalidateConv(convKey)
+		}
 		if writeExhaustedJSON(w, err) {
 			return
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
+	}
+	if genMeta != nil && genMeta.Valid() {
+		full := append(convHistory, conv.Msg{Role: "model", Content: text})
+		a.storeConv(modelName, genMeta.Account, full, genMeta, "")
 	}
 
 	var responseParts []models.GooglePart

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ikhsan3adi/gemini-web2api/internal/conv"
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
@@ -84,7 +85,33 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		ToolChoice: toolChoice,
 	}
 
+	// Conversation continuation. The Responses API gives us previous_response_id,
+	// which is the most precise signal; fall back to the history prefix.
+	convHistory := chatMessagesToConvMsgs(reqMessages)
+	var convPrefix []conv.Msg
+	if len(convHistory) > 0 {
+		convPrefix = convHistory[:len(convHistory)-1]
+	}
+
+	var convMeta []any
+	var convKey string
+	var convHit bool
+	if prevID, _ := req["previous_response_id"].(string); prevID != "" && a.Pool.convs != nil {
+		if rec, ok := a.Pool.convs.GetByResponseID(prevID); ok && len(rec.Metadata) > 0 && rec.Model == conv.NormalizeModel(modelStr) {
+			convMeta = rec.Metadata
+			convHit = true
+			a.Logf("conv hit via previous_response_id %s", prevID)
+		}
+	}
+	if !convHit {
+		convMeta, convKey, convHit = a.resolveConv(modelStr, convPrefix)
+	}
+
 	prompt, images, err := format.MessagesToPrompt(chatReq)
+	if convHit {
+		prompt = lastMessageText(reqMessages)
+		images = nil
+	}
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty input"}})
 		return
@@ -100,8 +127,11 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		Extra:       resolved.Extra,
 	}
 
-	text, err := a.Pool.Generate(prompt, gemOpt, images)
+	text, genMeta, err := a.Pool.Generate(r.Context(), prompt, gemOpt, images, convMeta)
 	if err != nil {
+		if convHit && gemini.IsCredentialError(err) {
+			a.invalidateConv(convKey)
+		}
 		if writeExhaustedJSON(w, err) {
 			return
 		}
@@ -119,6 +149,13 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	rid := fmt.Sprintf("resp_%s", format.RandHex(16))
 	mid := fmt.Sprintf("msg_%s", format.RandHex(12))
+
+	// Cache the conversation handle keyed by this response id, so the next turn
+	// can resume with previous_response_id.
+	if genMeta != nil && genMeta.Valid() {
+		full := append(convHistory, conv.Msg{Role: "assistant", Content: text})
+		a.storeConv(modelStr, genMeta.Account, full, genMeta, rid)
+	}
 
 	outputItems := format.BuildResponseOutput(text, toolCalls, mid)
 

@@ -16,9 +16,12 @@
   "log_requests": true,
   "impersonate": "",
   "temporary_chats": false,
-
   "accounts": [],
   "quota_threshold": 0.95,
   "quota_refresh_sec": 300,
-  "auto_xsrf": true
+  "auto_xsrf": true,
+  "max_concurrent": 1,
+  "conv_cache": true,
+  "conv_cache_ttl_days": 30,
+  "conv_cache_path": "/app/data/conversations.json"
 }

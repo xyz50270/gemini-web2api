@@ -167,6 +167,7 @@ func main() {
 	<-stopCtx.Done()
 	log.Println("Shutting down server gracefully...")
 	app.Pool.Close()
+	app.Pool.CloseConversations()
 	cancelStartup()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

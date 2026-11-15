@@ -46,6 +46,13 @@ type Config struct {
 	QuotaThreshold  float64         `json:"quota_threshold"`
 	QuotaRefreshSec int             `json:"quota_refresh_sec"`
 	AutoXSRF        bool            `json:"auto_xsrf"`
+
+	// Admission and context reuse. MaxConcurrent serialises upstream generation
+	// so the service never looks like a bot farm; 1 matches a single browser tab.
+	MaxConcurrent   int    `json:"max_concurrent"`
+	ConvCache       bool   `json:"conv_cache"`
+	ConvCacheTTLDay int    `json:"conv_cache_ttl_days"`
+	ConvCachePath   string `json:"conv_cache_path"`
 }
 
 func Default() Config {
@@ -69,6 +76,10 @@ func Default() Config {
 		QuotaThreshold:    0.95,
 		QuotaRefreshSec:   300,
 		AutoXSRF:          true,
+		MaxConcurrent:     1,
+		ConvCache:         true,
+		ConvCacheTTLDay:   30,
+		ConvCachePath:     "/app/data/conversations.json",
 	}
 }
 
@@ -106,6 +117,10 @@ func Load(path string) (Config, error) {
 		QuotaThreshold    *float64          `json:"quota_threshold"`
 		QuotaRefreshSec   *int              `json:"quota_refresh_sec"`
 		AutoXSRF          *bool             `json:"auto_xsrf"`
+		MaxConcurrent     *int              `json:"max_concurrent"`
+		ConvCache         *bool             `json:"conv_cache"`
+		ConvCacheTTLDay   *int              `json:"conv_cache_ttl_days"`
+		ConvCachePath     *string           `json:"conv_cache_path"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -168,6 +183,18 @@ func Load(path string) (Config, error) {
 	}
 	if aux.AutoXSRF != nil {
 		cfg.AutoXSRF = *aux.AutoXSRF
+	}
+	if aux.MaxConcurrent != nil {
+		cfg.MaxConcurrent = *aux.MaxConcurrent
+	}
+	if aux.ConvCache != nil {
+		cfg.ConvCache = *aux.ConvCache
+	}
+	if aux.ConvCacheTTLDay != nil {
+		cfg.ConvCacheTTLDay = *aux.ConvCacheTTLDay
+	}
+	if aux.ConvCachePath != nil {
+		cfg.ConvCachePath = *aux.ConvCachePath
 	}
 
 	return cfg, nil

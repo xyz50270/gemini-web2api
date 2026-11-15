@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ikhsan3adi/gemini-web2api/internal/conv"
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
@@ -42,7 +43,22 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		req.ToolChoice = "auto"
 	}
 
+	// Split the history: everything before the last message is the prefix that
+	// identifies the conversation, the last message is what we actually send.
+	convHistory := chatMessagesToConvMsgs(req.Messages)
+	var convPrefix []conv.Msg
+	if len(convHistory) > 0 {
+		convPrefix = convHistory[:len(convHistory)-1]
+	}
+
+	convMeta, convKey, convHit := a.resolveConv(modelStr, convPrefix)
+
 	prompt, images, err := format.MessagesToPrompt(req)
+	if convHit {
+		// Upstream already holds the history, so only the new message is needed.
+		prompt = lastMessageText(req.Messages)
+		images = nil
+	}
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty prompt"}})
 		return
@@ -87,7 +103,8 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
-		emitErr := a.Pool.GenerateStream(prompt, gemOpt, promptImages, func(delta string) error {
+		var fullText string
+		streamMeta, emitErr := a.Pool.GenerateStream(r.Context(), prompt, gemOpt, promptImages, convMeta, func(delta string) error {
 			if !started {
 				started = true
 				if !startSSE(w) {
@@ -110,11 +127,16 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 			}
+			fullText += delta
 			return writeSSEData(w, chunk)
 		})
 
 		if emitErr == errClientGone {
 			return
+		}
+
+		if emitErr != nil && convHit && gemini.IsCredentialError(emitErr) {
+			a.invalidateConv(convKey)
 		}
 
 		if emitErr == nil {
@@ -141,6 +163,11 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = writeSSEData(w, endChunk)
 			_ = writeSSEDone(w)
+
+			if streamMeta != nil && streamMeta.Valid() {
+				full := append(convHistory, conv.Msg{Role: "assistant", Content: fullText})
+				a.storeConv(modelStr, streamMeta.Account, full, streamMeta, cid)
+			}
 			return
 		}
 
@@ -155,13 +182,20 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text, err := a.Pool.Generate(prompt, gemOpt, promptImages)
+	text, genMeta, err := a.Pool.Generate(r.Context(), prompt, gemOpt, promptImages, convMeta)
 	if err != nil {
+		if convHit && gemini.IsCredentialError(err) {
+			a.invalidateConv(convKey)
+		}
 		if writeExhaustedJSON(w, err) {
 			return
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
+	}
+	if genMeta != nil && genMeta.Valid() {
+		full := append(convHistory, conv.Msg{Role: "assistant", Content: text})
+		a.storeConv(modelStr, genMeta.Account, full, genMeta, cid)
 	}
 
 	var toolCalls []models.OpenAIToolCall

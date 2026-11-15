@@ -9,10 +9,14 @@ import (
 type StreamParser struct {
 	prevText string
 	buf      string
+
+	// Meta collects the conversation ids Google issues alongside the text so a
+	// follow-up request can continue this chat server-side.
+	Meta *ConversationMeta
 }
 
 func NewStreamParser() *StreamParser {
-	return &StreamParser{}
+	return &StreamParser{Meta: &ConversationMeta{}}
 }
 
 // ResetBuffer clears the line buffer before a retry attempt while preserving prevText across retries.
@@ -35,7 +39,7 @@ func (p *StreamParser) Feed(chunk string) ([]string, error) {
 		line := p.buf[:idx]
 		p.buf = p.buf[idx+1:]
 
-		texts := ExtractTextsFromLine(line)
+		texts := ExtractTextsAndMeta(line, p.Meta)
 		for _, t := range texts {
 			// Skip if this text segment has already been fully processed or is identical to the last one.
 			if t == p.prevText || strings.HasPrefix(p.prevText, t) {

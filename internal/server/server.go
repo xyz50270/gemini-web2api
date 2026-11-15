@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/config"
+	"github.com/ikhsan3adi/gemini-web2api/internal/conv"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 )
 
@@ -48,9 +49,30 @@ func New(cfg config.Config, version string) *App {
 	probe := gemini.NewClient(cfg)
 	requester = probe.HTTP
 
+	pool := NewPool(cfg, requester, logFn)
+
+	// Conversation reuse needs the persisted handles; a failure to open the file
+	// only disables caching, it must not prevent startup.
+	if cfg.ConvCache && !cfg.TemporaryChats {
+		store, err := conv.Open(cfg.ConvCachePath)
+		if err != nil {
+			logFn("conversation cache disabled: %v", err)
+		} else {
+			ttl := time.Duration(cfg.ConvCacheTTLDay) * 24 * time.Hour
+			if n := store.PurgeOlderThan(ttl); n > 0 {
+				logFn("conversation cache: purged %d entries older than %s", n, ttl)
+			}
+			store.StartBackground()
+			pool.convs = store
+			logFn("conversation cache: %d entries at %s (ttl %dd)", store.Len(), cfg.ConvCachePath, cfg.ConvCacheTTLDay)
+		}
+	} else if cfg.TemporaryChats {
+		logFn("conversation cache disabled: temporary_chats is on, upstream discards those chats")
+	}
+
 	app := &App{
 		Cfg:        cfg,
-		Pool:       NewPool(cfg, requester, logFn),
+		Pool:       pool,
 		HTTPClient: httpClient,
 		Logf:       logFn,
 		Version:    version,

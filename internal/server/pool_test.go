@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -282,7 +283,7 @@ func TestGenerateFailsOverOnQuotaError(t *testing.T) {
 	req := &stubRequester{status: http.StatusTooManyRequests, body: "quota"}
 	p := newTestPool(t, poolConfig(0.95, "0", "1"), req)
 
-	_, err := p.Generate("hi", gemini.ModelOptions{}, nil)
+	_, _, err := p.Generate(context.Background(), "hi", gemini.ModelOptions{}, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when both accounts are rate limited")
 	}
@@ -302,7 +303,7 @@ func TestGenerateExhaustedWithoutUpstreamCall(t *testing.T) {
 	setQuota(t, p.accounts[0], 0.99, 0.99, reset)
 	setQuota(t, p.accounts[1], 0.98, 0.98, reset)
 
-	_, err := p.Generate("hi", gemini.ModelOptions{}, nil)
+	_, _, err := p.Generate(context.Background(), "hi", gemini.ModelOptions{}, nil, nil)
 	if !IsAllExhausted(err) {
 		t.Fatalf("err = %v, want ErrAllExhausted", err)
 	}
@@ -363,7 +364,7 @@ func TestGenerateStreamEmitsDeltas(t *testing.T) {
 	setQuota(t, p.accounts[0], 0.0, 0.0, time.Time{})
 
 	var got []string
-	err := p.GenerateStream("hi", gemini.ModelOptions{}, nil, func(d string) error {
+	_, err := p.GenerateStream(context.Background(), "hi", gemini.ModelOptions{}, nil, nil, func(d string) error {
 		got = append(got, d)
 		return nil
 	})
@@ -411,7 +412,7 @@ func TestGenerateStreamFailsOverBeforeFirstDelta(t *testing.T) {
 	setQuota(t, p.accounts[1], 0.0, 0.0, time.Time{})
 
 	var got []string
-	err := p.GenerateStream("hi", gemini.ModelOptions{}, nil, func(d string) error {
+	_, err := p.GenerateStream(context.Background(), "hi", gemini.ModelOptions{}, nil, nil, func(d string) error {
 		got = append(got, d)
 		return nil
 	})
