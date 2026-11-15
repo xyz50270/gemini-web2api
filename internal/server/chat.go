@@ -189,6 +189,8 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 					},
 				}
 				_ = writeSSEData(w, usageChunk)
+				a.usageLogger("/v1/chat/completions", true, true,
+					format.EstimateTokens(fullPrompt), format.EstimateTokens(fullText))
 			}
 			_ = writeSSEDone(w)
 
@@ -210,6 +212,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	usageRequested := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 	text, genMeta, err := a.Pool.GenerateWithConv(r.Context(), fullPrompt, gemOpt, promptImages, resolve)
 	if err != nil {
 		if convHit && gemini.IsCredentialError(err) {
@@ -225,6 +228,11 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		full := append(convHistory, conv.Msg{Role: "assistant", Content: text})
 		a.storeConv(modelStr, genMeta.Account, full, genMeta, cid)
 	}
+
+	// Token accounting reads the untouched reply: parsing a tool call moves it
+	// out of text, and billing the remaining empty string reports zero output
+	// tokens for the replies that cost the most to produce.
+	rawText := text
 
 	var toolCalls []models.OpenAIToolCall
 	if len(req.Tools) > 0 && text != "" && !isToolNone {
@@ -268,7 +276,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		_ = writeSSEData(w, chunk)
 
 		if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
-			pt, ct := format.EstimateTokens(fullPrompt), format.EstimateTokens(text)
+			pt, ct := format.EstimateTokens(fullPrompt), format.CompletionTokens(rawText, text)
 			usageChunk := models.OpenAIChatResponse{
 				ID:      cid,
 				Object:  "chat.completion.chunk",
@@ -286,7 +294,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		_ = writeSSEDone(w)
 	} else {
 		promptTokens := format.EstimateTokens(fullPrompt)
-		completionTokens := format.EstimateTokens(text)
+		completionTokens := format.CompletionTokens(rawText, text)
 		resp := models.OpenAIChatResponse{
 			ID:      cid,
 			Object:  "chat.completion",
@@ -305,6 +313,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				TotalTokens:      promptTokens + completionTokens,
 			},
 		}
+		a.usageLogger("/v1/chat/completions", false, usageRequested, promptTokens, completionTokens)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }

@@ -122,7 +122,6 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return meta, lastPrompt, key
 	}
 
-
 	// Image upload is performed inside the pool against the account that
 	// actually serves the request.
 	gemOpt := gemini.ModelOptions{
@@ -148,6 +147,11 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	strChoice, isStr := toolChoice.(string)
 	isToolNone := isStr && strChoice == "none"
 
+	// Token accounting reads the untouched reply: parsing a tool call moves it
+	// out of text, and billing the remaining empty string reports zero output
+	// tokens for the replies that cost the most to produce.
+	rawText := text
+
 	var toolCalls []models.OpenAIToolCall
 	if len(reqTools) > 0 && text != "" && !isToolNone {
 		text, toolCalls = format.ParseToolCalls(text)
@@ -167,7 +171,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	stream, _ := req["stream"].(bool)
 	promptTokens := format.EstimateTokens(fullPrompt)
-	outputTokens := format.EstimateTokens(text)
+	outputTokens := format.CompletionTokens(rawText, text)
 
 	if stream {
 		if !startSSE(w) {
@@ -327,5 +331,6 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 				"total_tokens":  promptTokens + outputTokens,
 			},
 		})
+		a.usageLogger("/v1/responses", stream, false, promptTokens, outputTokens)
 	}
 }

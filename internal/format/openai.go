@@ -362,6 +362,25 @@ func ParseToolCalls(text string) (string, []models.OpenAIToolCall) {
 	return clean, toolCalls
 }
 
+// CompletionTokens estimates the tokens generated for one completion.
+//
+// The visible text alone is not a usable input: ParseToolCalls and
+// ParseGoogleFunctionCalls move a tool call out of the reply and into a
+// structured field, leaving the text empty. Counting only that text reports
+// zero output tokens for exactly the replies that cost the most to produce, and
+// a gateway that bills upstream usage then records the request as free.
+//
+// raw is the untouched upstream output, visible is what the client receives
+// after tool-call parsing. Counting both and keeping the larger is always >=
+// the visible-reply count, so ordinary replies are unaffected.
+func CompletionTokens(raw, visible string) int {
+	n := EstimateTokens(raw)
+	if m := EstimateTokens(visible); m > n {
+		n = m
+	}
+	return n
+}
+
 // EstimateTokens approximates a token count for text.
 //
 // The old len(s)/4 rule assumed English. CJK is far denser: a Chinese character

@@ -168,3 +168,17 @@ func uploadImagesWith(tokens *multimodal.TokenCache, client *gemini.Client, req 
 	}
 	return fileRefs, nil
 }
+
+// usageLogger reports what a completion actually returned, so token accounting
+// problems can be diagnosed from the server side instead of guessing at the
+// gateway's behaviour.
+//
+// Enable with `log_usage: true`. It prints the token counts and the client's
+// stream flags, never the prompt or the answer.
+func (a *App) usageLogger(path string, stream bool, includeUsage bool, promptTokens, completionTokens int) {
+	if a.Cfg.LogUsage == nil || !*a.Cfg.LogUsage {
+		return
+	}
+	a.Logf("usage %s: stream=%t include_usage=%t prompt=%d completion=%d total=%d",
+		path, stream, includeUsage, promptTokens, completionTokens, promptTokens+completionTokens)
+}

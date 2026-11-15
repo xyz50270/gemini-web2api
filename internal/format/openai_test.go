@@ -24,6 +24,57 @@ func TestParseToolCalls(t *testing.T) {
 	}
 }
 
+// A reply that is nothing but a tool call parses down to an empty string. Billing
+// that empty string reports zero output tokens, which is how a gateway ends up
+// recording the most expensive replies as free.
+func TestCompletionTokensCountsParsedToolCall(t *testing.T) {
+	raw := "```tool_call\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Jakarta\", \"days\": 3}}\n```"
+	visible, calls := ParseToolCalls(raw)
+	if len(calls) != 1 {
+		t.Fatalf("expected the tool call to parse, got %d calls", len(calls))
+	}
+	if visible != "" {
+		t.Fatalf("expected the visible text to be empty, got %q", visible)
+	}
+	if got := EstimateTokens(visible); got != 0 {
+		t.Fatalf("the visible text alone should estimate 0, got %d", got)
+	}
+
+	got := CompletionTokens(raw, visible)
+	if got <= 0 {
+		t.Fatalf("CompletionTokens = %d, want > 0 for a tool-only reply", got)
+	}
+	if want := EstimateTokens(raw); got != want {
+		t.Errorf("CompletionTokens = %d, want the raw count %d", got, want)
+	}
+}
+
+// Ordinary replies must be counted exactly as before.
+func TestCompletionTokensPlainReply(t *testing.T) {
+	text := "The capital of France is Paris."
+	if got, want := CompletionTokens(text, text), EstimateTokens(text); got != want {
+		t.Errorf("CompletionTokens = %d, want %d", got, want)
+	}
+}
+
+// Parsing can shorten the visible text, never lengthen it, so the result is the
+// larger of the two rather than a sum that would double-count.
+func TestCompletionTokensTakesLargerNotSum(t *testing.T) {
+	raw := "Sure, calling now.\n```tool_call\n{\"name\": \"ping\", \"arguments\": {}}\n```"
+	visible, calls := ParseToolCalls(raw)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+
+	got := CompletionTokens(raw, visible)
+	if got != EstimateTokens(raw) {
+		t.Errorf("CompletionTokens = %d, want %d", got, EstimateTokens(raw))
+	}
+	if got == EstimateTokens(raw)+EstimateTokens(visible) {
+		t.Error("counts were summed, which double-counts the visible part")
+	}
+}
+
 func TestMessagesToPrompt(t *testing.T) {
 	req := models.OpenAIChatRequest{
 		Messages: []models.OpenAIMessage{

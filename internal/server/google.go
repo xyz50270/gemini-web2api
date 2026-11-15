@@ -242,6 +242,8 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		ModelVersion: resolved.Name,
 	}
 
+	a.usageLogger("/v1beta/models", stream, false, promptTokens, candidatesTokens)
+
 	if stream {
 		if !startSSE(w) {
 			return

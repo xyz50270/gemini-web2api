@@ -24,21 +24,24 @@ func (a AccountConfig) IsEnabled() bool {
 }
 
 type Config struct {
-	Port              int      `json:"port"`
-	Host              string   `json:"host"`
-	RetryAttempts     int      `json:"retry_attempts"`
-	RetryDelaySec     int      `json:"retry_delay_sec"`
-	RequestTimeoutSec int      `json:"request_timeout_sec"`
-	GeminiBL          string   `json:"gemini_bl"`
-	AuthUser          string   `json:"auth_user"`
-	XSRFToken         string   `json:"xsrf_token"`
-	DefaultModel      string   `json:"default_model"`
-	LogRequests       bool     `json:"log_requests"`
-	CookieFile        string   `json:"cookie_file"`
-	Proxy             string   `json:"proxy"`
-	APIKeys           []string `json:"api_keys"`
-	Impersonate       string   `json:"impersonate"`
-	TemporaryChats    bool     `json:"temporary_chats"`
+	Port              int    `json:"port"`
+	Host              string `json:"host"`
+	RetryAttempts     int    `json:"retry_attempts"`
+	RetryDelaySec     int    `json:"retry_delay_sec"`
+	RequestTimeoutSec int    `json:"request_timeout_sec"`
+	GeminiBL          string `json:"gemini_bl"`
+	AuthUser          string `json:"auth_user"`
+	XSRFToken         string `json:"xsrf_token"`
+	DefaultModel      string `json:"default_model"`
+	LogRequests       bool   `json:"log_requests"`
+	// LogUsage prints the token counts of each completion, for diagnosing
+	// gateways that report zero output. Off unless explicitly set.
+	LogUsage       *bool    `json:"log_usage"`
+	CookieFile     string   `json:"cookie_file"`
+	Proxy          string   `json:"proxy"`
+	APIKeys        []string `json:"api_keys"`
+	Impersonate    string   `json:"impersonate"`
+	TemporaryChats bool     `json:"temporary_chats"`
 
 	// Cookie rotation. Google refreshes SIDCC/PSIDTS every ~10 minutes and
 	// rejects a stale chain, so the service renews it on its own. These two
@@ -110,32 +113,33 @@ func Load(path string) (Config, error) {
 	// but standard unmarshal over struct fields handles JSON null for strings by leaving existing or setting zero-value if unmarshaling map/struct.
 	// Let's ensure string fields default properly if JSON has explicitly `null`.
 	var aux struct {
-		Port              *int      `json:"port"`
-		Host              *string   `json:"host"`
-		RetryAttempts     *int      `json:"retry_attempts"`
-		RetryDelaySec     *int      `json:"retry_delay_sec"`
-		RequestTimeoutSec *int      `json:"request_timeout_sec"`
-		GeminiBL          *string   `json:"gemini_bl"`
-		AuthUser          *string   `json:"auth_user"`
-		XSRFToken         *string   `json:"xsrf_token"`
-		DefaultModel      *string   `json:"default_model"`
-		LogRequests       *bool     `json:"log_requests"`
-		CookieFile        *string   `json:"cookie_file"`
-		Proxy             *string   `json:"proxy"`
-		APIKeys           *[]string         `json:"api_keys"`
-		Impersonate       *string           `json:"impersonate"`
-		TemporaryChats    *bool             `json:"temporary_chats"`
-		Accounts          *[]AccountConfig  `json:"accounts"`
-		QuotaThreshold    *float64          `json:"quota_threshold"`
-		QuotaRefreshSec   *int              `json:"quota_refresh_sec"`
-		AutoXSRF          *bool             `json:"auto_xsrf"`
-		MaxConcurrent     *int              `json:"max_concurrent"`
-		QueueTimeoutSec   *int              `json:"queue_timeout_sec"`
-		ChromeDeviceID    *string           `json:"chrome_device_id"`
-		GaiaID            *string           `json:"gaia_id"`
-		ConvCache         *bool             `json:"conv_cache"`
-		ConvCacheTTLDay   *int              `json:"conv_cache_ttl_days"`
-		ConvCachePath     *string           `json:"conv_cache_path"`
+		Port              *int             `json:"port"`
+		Host              *string          `json:"host"`
+		RetryAttempts     *int             `json:"retry_attempts"`
+		RetryDelaySec     *int             `json:"retry_delay_sec"`
+		RequestTimeoutSec *int             `json:"request_timeout_sec"`
+		GeminiBL          *string          `json:"gemini_bl"`
+		AuthUser          *string          `json:"auth_user"`
+		XSRFToken         *string          `json:"xsrf_token"`
+		DefaultModel      *string          `json:"default_model"`
+		LogRequests       *bool            `json:"log_requests"`
+		LogUsage          *bool            `json:"log_usage"`
+		CookieFile        *string          `json:"cookie_file"`
+		Proxy             *string          `json:"proxy"`
+		APIKeys           *[]string        `json:"api_keys"`
+		Impersonate       *string          `json:"impersonate"`
+		TemporaryChats    *bool            `json:"temporary_chats"`
+		Accounts          *[]AccountConfig `json:"accounts"`
+		QuotaThreshold    *float64         `json:"quota_threshold"`
+		QuotaRefreshSec   *int             `json:"quota_refresh_sec"`
+		AutoXSRF          *bool            `json:"auto_xsrf"`
+		MaxConcurrent     *int             `json:"max_concurrent"`
+		QueueTimeoutSec   *int             `json:"queue_timeout_sec"`
+		ChromeDeviceID    *string          `json:"chrome_device_id"`
+		GaiaID            *string          `json:"gaia_id"`
+		ConvCache         *bool            `json:"conv_cache"`
+		ConvCacheTTLDay   *int             `json:"conv_cache_ttl_days"`
+		ConvCachePath     *string          `json:"conv_cache_path"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -171,6 +175,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.LogRequests != nil {
 		cfg.LogRequests = *aux.LogRequests
+	}
+	if aux.LogUsage != nil {
+		cfg.LogUsage = aux.LogUsage
 	}
 	if aux.CookieFile != nil {
 		cfg.CookieFile = *aux.CookieFile

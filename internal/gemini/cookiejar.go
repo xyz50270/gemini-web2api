@@ -248,3 +248,7 @@ func (r *rotatingRequester) Do(req *http.Request) (*http.Response, error) {
 func NewRotatingRequester(inner Requester, cache *CookieCache) Requester {
 	return newRotatingRequester(inner, cache)
 }
+
+// Unwrap exposes the wrapped requester so callers (and tests) can inspect the
+// underlying transport, e.g. to assert the proxy is configured.
+func (r *rotatingRequester) Unwrap() Requester { return r.inner }
