@@ -335,3 +335,38 @@ func TestResponsesInputToMessagesMultiPartText(t *testing.T) {
 		t.Errorf("Got content %q, want %q", userContent, expected)
 	}
 }
+
+func TestEstimateTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		min  int
+		max  int
+	}{
+		{"empty", "", 0, 0},
+		{"short english", "hello", 1, 3},
+		{"english sentence", "The quick brown fox jumps over the lazy dog", 9, 14},
+		// CJK must not be under-counted the way len(s)/4 does (which would give 1).
+		{"chinese short", "你好世界", 3, 6},
+		{"chinese sentence", "这是一个用来测试分词估算的中文句子", 13, 20},
+		{"mixed", "Hello 世界 world 你好", 5, 12},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EstimateTokens(tt.in)
+			if got < tt.min || got > tt.max {
+				t.Errorf("EstimateTokens(%q) = %d, want %d..%d", tt.in, got, tt.min, tt.max)
+			}
+		})
+	}
+}
+
+func TestEstimateTokensCJKNotUnderCounted(t *testing.T) {
+	// A 40-character Chinese paragraph is roughly 40 tokens. The old len/4 rule
+	// would report 10, which is what made gateways show near-zero output.
+	zh := "这是一个比较长的中文段落用来验证估算逻辑不会低估中文的令牌数量谢谢"
+	got := EstimateTokens(zh)
+	if got < 30 {
+		t.Errorf("EstimateTokens(CJK) = %d, want >= 30 (len/4 would be %d)", got, len(zh)/4)
+	}
+}

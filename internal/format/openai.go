@@ -361,3 +361,35 @@ func ParseToolCalls(text string) (string, []models.OpenAIToolCall) {
 	clean := strings.TrimSpace(strings.Join(cleanParts, ""))
 	return clean, toolCalls
 }
+
+// EstimateTokens approximates a token count for text.
+//
+// The old len(s)/4 rule assumed English. CJK is far denser: a Chinese character
+// is roughly one token on its own, and mostly-ASCII text still averages about
+// four characters per token. Counting the two classes separately keeps the
+// estimate usable for both instead of under-reporting CJK by ~4x.
+func EstimateTokens(s string) int {
+	if s == "" {
+		return 0
+	}
+
+	var ascii, wide int
+	for _, r := range s {
+		if r < 128 {
+			ascii++
+		} else {
+			wide++
+		}
+	}
+
+	// ASCII: ~4 chars/token. Non-ASCII (CJK, emoji): ~1 char/token, and
+	// punctuation/whitespace cost a little extra, so round up.
+	n := ascii/4 + wide
+	if rem := ascii % 4; rem > 0 {
+		n++
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}

@@ -166,8 +166,8 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	outputItems := format.BuildResponseOutput(text, toolCalls, mid)
 
 	stream, _ := req["stream"].(bool)
-	promptTokens := len(fullPrompt) / 4
-	outputTokens := len(text) / 4
+	promptTokens := format.EstimateTokens(fullPrompt)
+	outputTokens := format.EstimateTokens(text)
 
 	if stream {
 		if !startSSE(w) {

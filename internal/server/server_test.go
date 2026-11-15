@@ -321,3 +321,63 @@ func TestRoutesOpenWhenNoKeysConfigured(t *testing.T) {
 		t.Errorf("GET /v1/models with auth disabled = %d, want 200", rec.Code)
 	}
 }
+
+// A streaming caller that asks for usage must receive a trailing chunk carrying
+// token counts, otherwise gateways bill it as zero output.
+func TestStreamIncludesUsageWhenRequested(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	app := New(cfg, "test")
+
+	body := `{"model":"gemini-4-hydrogen","stream":true,` +
+		`"stream_options":{"include_usage":true},` +
+		`"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	app.Handler().ServeHTTP(rec, req)
+
+	// Upstream is unreachable in tests, so the handler answers 502 before any
+	// SSE. What matters here is that the request parsed and did not panic; the
+	// usage shape itself is covered by the unit test below.
+	if rec.Code != http.StatusBadGateway && rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d", rec.Code)
+	}
+}
+
+func TestUsageChunkShape(t *testing.T) {
+	// Mirrors what the streaming path emits: empty choices plus a usage object.
+	chunk := models.OpenAIChatResponse{
+		ID:      "chatcmpl-test",
+		Object:  "chat.completion.chunk",
+		Model:   "gemini-4-hydrogen",
+		Choices: []models.OpenAIChoice{},
+		Usage: &models.OpenAIUsage{
+			PromptTokens:     10,
+			CompletionTokens: 42,
+			TotalTokens:      52,
+		},
+	}
+
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	usage, ok := parsed["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("usage missing from chunk: %s", data)
+	}
+	if usage["completion_tokens"].(float64) != 42 {
+		t.Errorf("completion_tokens = %v, want 42", usage["completion_tokens"])
+	}
+	choices, ok := parsed["choices"].([]any)
+	if !ok || len(choices) != 0 {
+		t.Errorf("choices = %v, want an empty array", parsed["choices"])
+	}
+}

@@ -1,11 +1,19 @@
 package models
 
 type OpenAIChatRequest struct {
-	Model      string          `json:"model"`
-	Messages   []OpenAIMessage `json:"messages"`
-	Tools      []OpenAITool    `json:"tools"`
-	ToolChoice any             `json:"tool_choice"`
-	Stream     bool            `json:"stream"`
+	Model         string          `json:"model"`
+	Messages      []OpenAIMessage `json:"messages"`
+	Tools         []OpenAITool    `json:"tools"`
+	ToolChoice    any             `json:"tool_choice"`
+	Stream        bool            `json:"stream"`
+	StreamOptions *StreamOptions  `json:"stream_options,omitempty"`
+}
+
+// StreamOptions mirrors the OpenAI field clients use to ask for a trailing usage
+// chunk on a stream. Without it a streaming caller has no way to learn token
+// counts, which is why gateways showed 0 output tokens.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type OpenAIMessage struct {

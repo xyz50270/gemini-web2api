@@ -171,6 +171,25 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				},
 			}
 			_ = writeSSEData(w, endChunk)
+
+			// OpenAI clients ask for the trailing usage chunk via
+			// stream_options.include_usage. Gateways rely on it to bill and to
+			// report token counts, so omitting it makes every stream look free.
+			if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+				usageChunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{},
+					Usage: &models.OpenAIUsage{
+						PromptTokens:     format.EstimateTokens(fullPrompt),
+						CompletionTokens: format.EstimateTokens(fullText),
+						TotalTokens:      format.EstimateTokens(fullPrompt) + format.EstimateTokens(fullText),
+					},
+				}
+				_ = writeSSEData(w, usageChunk)
+			}
 			_ = writeSSEDone(w)
 
 			if streamMeta != nil && streamMeta.Valid() {
@@ -247,10 +266,27 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 		_ = writeSSEData(w, chunk)
+
+		if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+			pt, ct := format.EstimateTokens(fullPrompt), format.EstimateTokens(text)
+			usageChunk := models.OpenAIChatResponse{
+				ID:      cid,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   resolved.Name,
+				Choices: []models.OpenAIChoice{},
+				Usage: &models.OpenAIUsage{
+					PromptTokens:     pt,
+					CompletionTokens: ct,
+					TotalTokens:      pt + ct,
+				},
+			}
+			_ = writeSSEData(w, usageChunk)
+		}
 		_ = writeSSEDone(w)
 	} else {
-		promptTokens := len(fullPrompt) / 4
-		completionTokens := len(text) / 4
+		promptTokens := format.EstimateTokens(fullPrompt)
+		completionTokens := format.EstimateTokens(text)
 		resp := models.OpenAIChatResponse{
 			ID:      cid,
 			Object:  "chat.completion",
