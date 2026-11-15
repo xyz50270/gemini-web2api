@@ -49,7 +49,11 @@ type Config struct {
 
 	// Admission and context reuse. MaxConcurrent serialises upstream generation
 	// so the service never looks like a bot farm; 1 matches a single browser tab.
+	// QueueTimeoutSec bounds how long a request may wait for a slot before the
+	// service gives up: with one slot, a single wedged upstream call would
+	// otherwise park every later request forever.
 	MaxConcurrent   int    `json:"max_concurrent"`
+	QueueTimeoutSec int    `json:"queue_timeout_sec"`
 	ConvCache       bool   `json:"conv_cache"`
 	ConvCacheTTLDay int    `json:"conv_cache_ttl_days"`
 	ConvCachePath   string `json:"conv_cache_path"`
@@ -77,6 +81,7 @@ func Default() Config {
 		QuotaRefreshSec:   300,
 		AutoXSRF:          true,
 		MaxConcurrent:     1,
+		QueueTimeoutSec:   240,
 		ConvCache:         true,
 		ConvCacheTTLDay:   30,
 		ConvCachePath:     "/app/data/conversations.json",
@@ -118,6 +123,7 @@ func Load(path string) (Config, error) {
 		QuotaRefreshSec   *int              `json:"quota_refresh_sec"`
 		AutoXSRF          *bool             `json:"auto_xsrf"`
 		MaxConcurrent     *int              `json:"max_concurrent"`
+		QueueTimeoutSec   *int              `json:"queue_timeout_sec"`
 		ConvCache         *bool             `json:"conv_cache"`
 		ConvCacheTTLDay   *int              `json:"conv_cache_ttl_days"`
 		ConvCachePath     *string           `json:"conv_cache_path"`
@@ -186,6 +192,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.MaxConcurrent != nil {
 		cfg.MaxConcurrent = *aux.MaxConcurrent
+	}
+	if aux.QueueTimeoutSec != nil {
+		cfg.QueueTimeoutSec = *aux.QueueTimeoutSec
 	}
 	if aux.ConvCache != nil {
 		cfg.ConvCache = *aux.ConvCache

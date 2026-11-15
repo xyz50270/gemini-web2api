@@ -383,6 +383,7 @@ new user message instead of the whole transcript.
 ```json
 {
   "max_concurrent": 1,
+  "queue_timeout_sec": 240,
   "conv_cache": true,
   "conv_cache_ttl_days": 30,
   "conv_cache_path": "/app/data/conversations.json"
@@ -463,6 +464,10 @@ gemini-web2api.exe
   behind each other. A real browser never runs two generations for one account,
   and mimicking that keeps the egress IP out of Google's abuse heuristics. A
   queued stream waits for the previous one to finish entirely.
+  `queue_timeout_sec` (default 240) bounds that wait: if a slot does not free up
+  in time the request fails fast with HTTP 503 and `code: queue_timeout` plus a
+  `Retry-After` header, instead of parking until the client gives up. Set it to 0
+  to wait indefinitely.
 - **Rate limits**: Google may throttle high-frequency requests. The server retries automatically but sustained heavy use may be blocked.
 
 ## License

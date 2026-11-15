@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -181,7 +182,7 @@ func NewPool(cfg config.Config, req gemini.Requester, logf func(format string, a
 		cfg:     cfg,
 		req:     req,
 		logf:    logf,
-		limiter: NewLimiter(cfg.MaxConcurrent),
+		limiter: NewLimiter(cfg.MaxConcurrent, cfg.QueueTimeoutSec),
 		stop:    make(chan struct{}),
 	}
 
@@ -845,4 +846,55 @@ func (p *Pool) generateStreamWithConv(fullPrompt string, opt gemini.ModelOptions
 		return nil, lastErr
 	}
 	return nil, p.exhaustedError(time.Now())
+}
+
+// writePoolError renders the non-upstream failures the pool can produce.
+//
+// A fully spent pool is 429 (retrying will not help until a window refreshes),
+// while a queue timeout is 503 (transient: the service is busy, the request
+// never reached Google). Both carry a machine-readable code so clients can tell
+// them apart without parsing prose.
+func writePoolError(w http.ResponseWriter, err error, queueTimeout time.Duration) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, ErrQueueTimeout) {
+		retryAfter := int(queueTimeout.Seconds())
+		if retryAfter <= 0 {
+			retryAfter = 30
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": map[string]any{
+				"message": "another generation is still running; timed out waiting for a free slot",
+				"type":    "service_unavailable",
+				"code":    "queue_timeout",
+			},
+		})
+		return true
+	}
+
+	var e *ErrAllExhausted
+	if errors.As(err, &e) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": map[string]any{
+				"message":  e.Error(),
+				"type":     "insufficient_quota",
+				"code":     "all_accounts_exhausted",
+				"accounts": e.Accounts,
+			},
+		})
+		return true
+	}
+
+	return false
+}
+
+// QueueTimeout returns the configured slot-wait budget, for error reporting.
+func (p *Pool) QueueTimeout() time.Duration {
+	if p.cfg.QueueTimeoutSec > 0 {
+		return time.Duration(p.cfg.QueueTimeoutSec) * time.Second
+	}
+	return 0
 }

@@ -23,5 +23,6 @@
   "max_concurrent": 1,
   "conv_cache": true,
   "conv_cache_ttl_days": 30,
-  "conv_cache_path": "/app/data/conversations.json"
+  "conv_cache_path": "/app/data/conversations.json",
+  "queue_timeout_sec": 240
 }

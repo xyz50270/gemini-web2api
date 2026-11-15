@@ -2,8 +2,15 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"time"
 )
+
+// ErrQueueTimeout is returned when a request waited for a slot longer than the
+// configured budget. With one slot, a single wedged upstream call would
+// otherwise park every later request until the client gives up.
+var ErrQueueTimeout = errors.New("timed out waiting for an upstream slot")
 
 // Limiter serialises upstream generation.
 //
@@ -16,6 +23,9 @@ import (
 type Limiter struct {
 	sem chan struct{}
 
+	// queueTimeout bounds the wait for a slot. Zero means wait forever.
+	queueTimeout time.Duration
+
 	mu       sync.Mutex
 	waiting  int
 	inflight int
@@ -23,15 +33,20 @@ type Limiter struct {
 
 // NewLimiter returns a limiter allowing at most n concurrent holders. n < 1 is
 // treated as 1 so a misconfiguration cannot disable the guard entirely.
-func NewLimiter(n int) *Limiter {
+// queueTimeoutSec <= 0 disables the queue timeout.
+func NewLimiter(n, queueTimeoutSec int) *Limiter {
 	if n < 1 {
 		n = 1
 	}
-	return &Limiter{sem: make(chan struct{}, n)}
+	var timeout time.Duration
+	if queueTimeoutSec > 0 {
+		timeout = time.Duration(queueTimeoutSec) * time.Second
+	}
+	return &Limiter{sem: make(chan struct{}, n), queueTimeout: timeout}
 }
 
-// Acquire blocks until a slot is free or ctx is done. Returning a non-nil error
-// means the caller must NOT call Release.
+// Acquire blocks until a slot is free, ctx is done, or the queue timeout fires.
+// Returning a non-nil error means the caller must NOT call Release.
 func (l *Limiter) Acquire(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -51,6 +66,15 @@ func (l *Limiter) Acquire(ctx context.Context) error {
 	l.waiting++
 	l.mu.Unlock()
 
+	// A wedged upstream call must not park every later request indefinitely, so
+	// the wait gets its own deadline in addition to the caller's context.
+	var timeoutCh <-chan time.Time
+	if l.queueTimeout > 0 {
+		timer := time.NewTimer(l.queueTimeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
+
 	select {
 	case l.sem <- struct{}{}:
 		l.mu.Lock()
@@ -63,6 +87,11 @@ func (l *Limiter) Acquire(ctx context.Context) error {
 		l.waiting--
 		l.mu.Unlock()
 		return ctx.Err()
+	case <-timeoutCh:
+		l.mu.Lock()
+		l.waiting--
+		l.mu.Unlock()
+		return ErrQueueTimeout
 	}
 }
 

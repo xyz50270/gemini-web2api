@@ -168,7 +168,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !started {
-			if writeExhaustedJSON(w, emitErr) {
+			if writePoolError(w, emitErr, a.Pool.QueueTimeout()) {
 				return
 			}
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", emitErr)}})
@@ -183,7 +183,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		if convHit && gemini.IsCredentialError(err) {
 			a.invalidateConv(convKey)
 		}
-		if writeExhaustedJSON(w, err) {
+		if writePoolError(w, err, a.Pool.QueueTimeout()) {
 			return
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
