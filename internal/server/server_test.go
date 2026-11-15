@@ -134,7 +134,7 @@ func TestChunkedTransferEncoding(t *testing.T) {
 	app := New(cfg, "test")
 	handler := app.Handler()
 
-	body := `{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"gemini-4-hydrogen","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -188,7 +188,7 @@ func TestResponsesSequenceNumberOrder(t *testing.T) {
 	app := New(cfg, "test")
 	handler := app.Handler()
 
-	body := `{"model":"gemini-3.6-flash","input":"test prompt"}`
+	body := `{"model":"gemini-4-hydrogen","input":"test prompt"}`
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -226,8 +226,8 @@ func TestModelHeaders(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req2)
 
-	if got := rec2.Header().Get("X-Resolved-Model"); got != "gemini-3.6-flash" {
-		t.Errorf("Expected X-Resolved-Model=gemini-3.6-flash, got %q", got)
+	if got := rec2.Header().Get("X-Resolved-Model"); got != "gemini-4-hydrogen" {
+		t.Errorf("Expected X-Resolved-Model=gemini-4-hydrogen, got %q", got)
 	}
 	if got := rec2.Header().Get("X-Model-Fallback"); got != "true" {
 		t.Errorf("Expected X-Model-Fallback=true for unknown model, got %q", got)
@@ -288,7 +288,7 @@ func TestAllRoutesRequireAuthWhenKeysConfigured(t *testing.T) {
 		{"POST", "/v1/responses"},
 		{"GET", "/v1/accounts"},
 		{"GET", "/v1beta/models"},
-		{"POST", "/v1beta/models/gemini-3.6-flash:generateContent"},
+		{"POST", "/v1beta/models/gemini-4-hydrogen:generateContent"},
 		{"GET", "/does-not-exist"},
 	}
 	for _, rt := range routes {

@@ -137,10 +137,10 @@ func TestResolveModelHeader(t *testing.T) {
 		t.Errorf("effModeAnon = %d, want 8", effModeAnon)
 	}
 
-	// Case 4: Standard / legacy model without ModelHeader (e.g. gemini-3.5-flash-thinking)
+	// Case 4: Standard / legacy model without ModelHeader (e.g. a model with no ModelHeader)
 	// Must NOT attach model header and must preserve its own ModelID
 	optThinking := ModelOptions{
-		ModelName:   "gemini-3.5-flash-thinking",
+		ModelName:   "generic-model",
 		ModelID:     1,
 		ThinkMode:   2,
 		ModelHeader: "",

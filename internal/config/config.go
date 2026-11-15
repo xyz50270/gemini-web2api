@@ -58,7 +58,7 @@ func Default() Config {
 		GeminiBL:          "boq_gemini-web-uiserver_20261113.11_p0",
 		AuthUser:          "",
 		XSRFToken:         "",
-		DefaultModel:      "gemini-3.6-flash",
+		DefaultModel:      "gemini-4-hydrogen",
 		LogRequests:       true,
 		CookieFile:        "",
 		Proxy:             "",

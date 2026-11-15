@@ -122,7 +122,7 @@ docker compose up -d
 | -------- | ------------------------------------------------------------------- |
 | Base URL | `http://localhost:8081/v1`                                          |
 | API Key  | any `api_keys` value from `config.json`; anything if not configured |
-| Model    | `gemini-3.5-flash-thinking`                                         |
+| Model    | `gemini-4-hydrogen`                                                 |
 
 ### curl
 
@@ -132,13 +132,13 @@ docker compose up -d
 curl http://localhost:8081/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-your-key" \
-  -d '{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"gemini-4-hydrogen","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 #### PowerShell (Windows)
 
 ```powershell
-curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer sk-your-key" -d "{\"model\":\"gemini-3.5-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}"
+curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer sk-your-key" -d "{\"model\":\"gemini-4-hydrogen\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}"
 ```
 
 > Note: On Windows PowerShell, use `curl.exe` and `--%` so PowerShell does not reinterpret JSON quoting or curl options.
@@ -149,7 +149,7 @@ curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: applica
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8081/v1", api_key="sk-your-key")
 resp = client.chat.completions.create(
-    model="gemini-3.5-flash-thinking",
+    model="gemini-4-hydrogen",
     messages=[{"role": "user", "content": "Explain quantum computing"}]
 )
 print(resp.choices[0].message.content)
@@ -171,19 +171,25 @@ Supports Google native API endpoints:
 
 ## Available Models
 
-| Model                            | Description                                  | Output          |
-| -------------------------------- | -------------------------------------------- | --------------- |
-| `gemini-4-argon`                 | Frontier model for complex tasks (needs Pro) | **~20k+ chars** |
-| `argon`, `gemini-4`              | Aliases for gemini-4-argon                   | **~20k+ chars** |
-| `gemini-3.8-flash`               | Latest all-around model (Gemini 3.8 Flash)   | ~12k chars      |
-| `gemini-3.7-flash`               | All-around model (Gemini 3.7 Flash)          | ~12k chars      |
-| `gemini-3.6-flash`               | All-around model (Gemini 3.6 Flash)          | ~12k chars      |
-| `gemini-3.5-flash`               | Alias for gemini-3.6-flash                   | ~12k chars      |
-| `gemini-3.5-flash-thinking`      | Extended thinking, longest output            | **~20k chars**  |
-| `gemini-3.5-flash-thinking-lite` | Adaptive thinking depth                      | ~15k chars      |
-| `gemini-3.1-pro`                 | Advanced math & code (needs Pro cookie)      | ~12k chars      |
-| `gemini-auto`                    | Auto model selection                         | varies          |
-| `gemini-flash-lite`              | Fastest answers, lightweight                 | ~10k chars      |
+These four backends are what a Gemini web account actually exposes, as reported by
+the `otAQ7b` discovery RPC. Longer aliases point at the same backend and cost
+nothing extra.
+
+| Model                 | Backend id         | Description                             | Output observed |
+| --------------------- | ------------------ | --------------------------------------- | --------------- |
+| `gemini-4-carbon`     | `95a4c0abcba24364` | Frontier tier, most complex work        | ~2200 words     |
+| `carbon`, `gemini-4-argon`, `gemini-4` | same | Aliases for gemini-4-carbon | ~2200 words |
+| `gemini-3.1-pro`      | `e6fa609c3fa255c0` | Pro, focused research answers           | ~680 words      |
+| `pro`, `gemini-3.1-pro-enhanced` | same    | Aliases for gemini-3.1-pro              | ~680 words      |
+| `gemini-4-hydrogen`   | `56fdd199312815e2` | Everyday general-purpose (default)      | ~1200 words     |
+| `hydrogen`, `gemini-3.5-flash` | same     | Aliases for gemini-4-hydrogen           | ~1200 words     |
+| `gemini-3.5-flash-lite` | `8c46e95b1a07cecc` | Fastest, lightweight quick answers    | ~1300 words     |
+| `flash-lite`, `gemini-flash-lite` | same   | Aliases for gemini-3.5-flash-lite       | ~1300 words     |
+
+> Every entry must carry a `Header`. Without it the upstream ignores the mode
+> field and silently answers with the default model, so names that look distinct
+> would all return the same backend. Unknown names fall back to
+> `gemini-4-hydrogen` and set the `X-Model-Fallback: true` response header.
 
 ### Thinking Depth
 
