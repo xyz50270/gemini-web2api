@@ -176,21 +176,21 @@ the UI selector embedded in the `otAQ7b` payload, not from the model list at
 `payload[15]` — that list also advertises "4 Carbon", which is gated by the
 `carbon_multi_ultra_pro_policy` entitlement and is not selectable without it.
 
-| Model                 | Backend id         | UI label             | Description              |
-| --------------------- | ------------------ | -------------------- | ------------------------ |
-| `gemini-4-argon`      | `95a4c0abcba24364` | 4 Argon              | Code & analysis          |
-| `argon`, `gemini-4`   | same               |                      | Aliases                  |
-| `gemini-3.1-pro`      | `e6fa609c3fa255c0` | 3.1 Pro              | Detailed research        |
-| `pro`, `gemini-3.1-pro-enhanced` | same    |                      | Aliases                  |
-| `gemini-4-hydrogen`   | `56fdd199312815e2` | 4 Hydrogen           | Everyday help (default)  |
-| `hydrogen`, `gemini-3.5-flash` | same     |                      | Aliases                  |
-| `gemini-3.5-flash-lite` | `8c46e95b1a07cecc` | 3.5 Flash-Lite     | Quick answers            |
-| `flash-lite`, `gemini-flash-lite` | same  |                      | Aliases                  |
+| Model                   | Backend id         | UI label       |
+| ----------------------- | ------------------ | -------------- |
+| `gemini-4-argon`        | `95a4c0abcba24364` | 4 Argon        |
+| `gemini-3.1-pro`        | `e6fa609c3fa255c0` | 3.1 Pro        |
+| `gemini-4-hydrogen`     | `56fdd199312815e2` | 4 Hydrogen     |
+| `gemini-3.5-flash-lite` | `8c46e95b1a07cecc` | 3.5 Flash-Lite |
 
-> Every entry must carry a `Header`. Without it the upstream ignores the mode
-> field and silently answers with the default model, so names that look distinct
-> would all return the same backend. Unknown names fall back to
-> `gemini-4-hydrogen` and set the `X-Model-Fallback: true` response header.
+`/v1/models` lists exactly these four, matching what the web UI offers. Every
+entry carries a `Header`, which is what actually routes a request: without it
+upstream ignores the mode field and answers with its default model.
+
+Aliases used by earlier versions (`argon`, `pro`, `gemini-3.5-flash`, …) were
+removed so the discovery list cannot imply models an account cannot select. A
+request naming one of them falls back to `gemini-4-hydrogen` and sets
+`X-Model-Fallback: true` in the response.
 
 ### Thinking Depth
 

@@ -41,8 +41,11 @@ type Model struct {
 // Header and no matching backend, so they all collapsed onto the same default
 // while appearing to be distinct.
 //
-// Aliases map several friendly names onto the same Header; they are genuinely
-// the same backend and cost nothing extra.
+// Only the four canonical names are registered. Aliases were removed on
+// purpose: /v1/models is a discovery endpoint, so it must list what an account
+// can actually select in the web UI. Extra names made the list look like twelve
+// models when there are four backends, and a request naming a removed alias now
+// falls back loudly (X-Model-Fallback) instead of silently resolving.
 var MODELS = map[string]Model{
 	// num 8 — 4 Argon, the code/analysis tier.
 	"gemini-4-argon": {
@@ -51,78 +54,29 @@ var MODELS = map[string]Model{
 		Header: "95a4c0abcba24364",
 		Desc:   "Frontier model for code and analysis (Gemini 4 Argon)",
 	},
-	"argon": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-argon",
-	},
-	"gemini-4": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-argon",
-	},
 
 	// num 3 — 3.1 Pro, focused research answers.
 	"gemini-3.1-pro": {
 		Mode:   3,
 		Think:  4,
 		Header: "e6fa609c3fa255c0",
-		Desc:   "Pro model with detailed research answers",
-	},
-	"gemini-3.1-pro-enhanced": {
-		Mode:   3,
-		Think:  4,
-		Header: "e6fa609c3fa255c0",
-		Desc:   "Alias for gemini-3.1-pro",
-		Extra:  map[int]any{31: 2, 80: 3},
-	},
-	"pro": {
-		Mode:   3,
-		Think:  4,
-		Header: "e6fa609c3fa255c0",
-		Desc:   "Alias for gemini-3.1-pro",
+		Desc:   "Pro model with detailed research answers (Gemini 3.1 Pro)",
 	},
 
-	// 4 Hydrogen — the default everyday tier.
+	// num 1 — 4 Hydrogen, the default everyday tier.
 	"gemini-4-hydrogen": {
 		Mode:   1,
 		Think:  4,
 		Header: "56fdd199312815e2",
 		Desc:   "Everyday general-purpose model (Gemini 4 Hydrogen)",
 	},
-	"hydrogen": {
-		Mode:   1,
-		Think:  4,
-		Header: "56fdd199312815e2",
-		Desc:   "Alias for gemini-4-hydrogen",
-	},
-	"gemini-3.5-flash": {
-		Mode:   1,
-		Think:  4,
-		Header: "56fdd199312815e2",
-		Desc:   "Alias for gemini-4-hydrogen",
-	},
 
-	// 3.5 Flash-Lite — fastest, cheapest.
+	// num 6 — 3.5 Flash-Lite, fastest and cheapest.
 	"gemini-3.5-flash-lite": {
 		Mode:   6,
 		Think:  4,
 		Header: "8c46e95b1a07cecc",
-		Desc:   "Lightweight fast model for quick answers (3.5 Flash-Lite)",
-	},
-	"gemini-flash-lite": {
-		Mode:   6,
-		Think:  4,
-		Header: "8c46e95b1a07cecc",
-		Desc:   "Alias for gemini-3.5-flash-lite",
-	},
-	"flash-lite": {
-		Mode:   6,
-		Think:  4,
-		Header: "8c46e95b1a07cecc",
-		Desc:   "Alias for gemini-3.5-flash-lite",
+		Desc:   "Lightweight fast model for quick answers (Gemini 3.5 Flash-Lite)",
 	},
 }
 
