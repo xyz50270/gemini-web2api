@@ -129,8 +129,8 @@ func (c *Client) UpdateBLIfNeeded() (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if newBL == "" {
-		return "", false, fmt.Errorf("empty BL fetched")
+	if !IsValidBL(newBL) {
+		return "", false, fmt.Errorf("fetched BL %q is not a valid build id", newBL)
 	}
 	oldBL := c.CurrentBL()
 	if newBL == oldBL {
@@ -247,16 +247,24 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		} else {
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
-				// 405 = BL expired. Refresh once and retry without consuming an attempt.
+				// 405 means the endpoint did not accept this verb/state. Refresh
+				// the build id and retry once regardless of whether it changed:
+				// a 405 is often transient, and the previous code only retried
+				// when the BL value moved, so a stuck refresh left 405 fatal.
 				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
 					blRefreshed = true
-					if _, changed, blErr := c.UpdateBLIfNeeded(); blErr == nil && changed {
-						c.Logf("BL auto-updated, retrying request")
-						bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
-						reqURL = BuildURL(cfg, c.CurrentBL())
-						attempt-- // retry without consuming an attempt
-						continue
+					newBL, changed, blErr := c.UpdateBLIfNeeded()
+					if blErr != nil {
+						c.Logf("BL refresh on 405 failed, retrying with current BL: %v", blErr)
+					} else if changed {
+						c.Logf("BL auto-updated to %s, retrying request", newBL)
+					} else {
+						c.Logf("BL unchanged (%s), retrying request once anyway", newBL)
 					}
+					bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+					reqURL = BuildURL(cfg, c.CurrentBL())
+					attempt-- // retry without consuming an attempt
+					continue
 				}
 				lastErr = err
 				// Hand credential/quota failures straight back to the pool so it
@@ -338,16 +346,22 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		} else {
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
-				// 405 = BL expired. Refresh once and retry without consuming an attempt.
+				// Same 405 handling as the non-streaming path: refresh the build id
+				// and retry once even when the value did not change.
 				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
 					blRefreshed = true
-					if _, changed, blErr := c.UpdateBLIfNeeded(); blErr == nil && changed {
-						c.Logf("BL auto-updated, retrying stream request")
-						bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
-						reqURL = BuildURL(cfg, c.CurrentBL())
-						attempt-- // retry without consuming an attempt
-						continue
+					newBL, changed, blErr := c.UpdateBLIfNeeded()
+					if blErr != nil {
+						c.Logf("BL refresh on 405 failed, retrying stream with current BL: %v", blErr)
+					} else if changed {
+						c.Logf("BL auto-updated to %s, retrying stream request", newBL)
+					} else {
+						c.Logf("BL unchanged (%s), retrying stream request once anyway", newBL)
 					}
+					bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+					reqURL = BuildURL(cfg, c.CurrentBL())
+					attempt-- // retry without consuming an attempt
+					continue
 				}
 				lastErr = err
 				if c.FailFast && (IsCredentialError(err) || IsQuotaError(err)) {

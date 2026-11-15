@@ -55,7 +55,7 @@ func Default() Config {
 		RetryAttempts:     3,
 		RetryDelaySec:     2,
 		RequestTimeoutSec: 180,
-		GeminiBL:          "boq_assistant-bard-web-server_20260716.08_p0",
+		GeminiBL:          "boq_gemini-web-uiserver_20261113.11_p0",
 		AuthUser:          "",
 		XSRFToken:         "",
 		DefaultModel:      "gemini-3.6-flash",
