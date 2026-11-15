@@ -34,18 +34,18 @@ func TestResolve(t *testing.T) {
 			wantFallback: false,
 		},
 		{
-			input:        "gemini-4-carbon",
+			input:        "gemini-4-argon",
 			defaultName:  "gemini-4-hydrogen",
-			wantName:     "gemini-4-carbon",
+			wantName:     "gemini-4-argon",
 			wantMode:     8,
 			wantThink:    4,
 			wantHeader:   "95a4c0abcba24364",
 			wantFallback: false,
 		},
 		{
-			input:        "carbon",
+			input:        "argon",
 			defaultName:  "gemini-4-hydrogen",
-			wantName:     "carbon",
+			wantName:     "argon",
 			wantMode:     8,
 			wantThink:    4,
 			wantHeader:   "95a4c0abcba24364",
@@ -97,9 +97,9 @@ func TestResolve(t *testing.T) {
 			wantFallback: false,
 		},
 		{
-			input:        "carbon@think=0",
+			input:        "argon@think=0",
 			defaultName:  "gemini-4-hydrogen",
-			wantName:     "carbon",
+			wantName:     "argon",
 			wantMode:     8,
 			wantThink:    0,
 			wantHeader:   "95a4c0abcba24364",
@@ -217,10 +217,10 @@ func TestDefaultModelIsRegistered(t *testing.T) {
 
 func TestBackendAliasesShareHeader(t *testing.T) {
 	// Aliases are only legitimate when they resolve to the same backend id.
-	carbon := []string{"gemini-4-carbon", "gemini-4-argon", "carbon", "gemini-4"}
-	for _, n := range carbon {
+	argon := []string{"gemini-4-argon", "argon", "gemini-4"}
+	for _, n := range argon {
 		if MODELS[n].Header != "95a4c0abcba24364" {
-			t.Errorf("%q should alias the Carbon backend", n)
+			t.Errorf("%q should alias the Argon backend", n)
 		}
 	}
 	hydrogen := []string{"gemini-4-hydrogen", "hydrogen", "gemini-3.5-flash"}

@@ -20,56 +20,56 @@ type Model struct {
 
 // MODELS lists the model names clients may request.
 //
-// The entries below are the four backends a Gemini web account actually
-// exposes, as reported by the otAQ7b model-discovery RPC:
+// The Gemini web UI offers exactly four choices for a standard account. They
+// come from two different places in the otAQ7b payload, which is why counting
+// the discovery list alone is misleading:
 //
-//	id                category     number
-//	56fdd199312815e2  4 Hydrogen     1
-//	e6fa609c3fa255c0  Pro (3.1)      3
-//	8c46e95b1a07cecc  Flash-Lite     6
-//	95a4c0abcba24364  4 Carbon       8
+//	UI selector entry                        backend id
+//	6  3.5 Flash-Lite  "Quick answers"        8c46e95b1a07cecc
+//	1  4 Hydrogen      "Everyday help"        56fdd199312815e2
+//	3  3.1 Pro         "Detailed research"    e6fa609c3fa255c0
+//	8  4 Argon         "Code & analysis"      95a4c0abcba24364
+//
+// The model list at payload[15] advertises "4 Carbon" (Carbon4p0) against the
+// same backend id, but Carbon is gated by the carbon_multi_ultra_pro_policy
+// entitlement and is not selectable on a normal account. Argon is the name such
+// an account actually gets, so that is what is exposed here.
 //
 // Header carries the backend id and is what actually routes a request: without
-// it the upstream ignores Mode and silently answers with the default model.
-// Earlier revisions listed names such as gemini-3.6-flash or gemini-auto that
-// had no Header and no matching backend, so they all collapsed onto the same
-// default model while appearing to be distinct.
+// it upstream ignores Mode and silently answers with the default model. Earlier
+// revisions listed names such as gemini-3.6-flash or gemini-auto that had no
+// Header and no matching backend, so they all collapsed onto the same default
+// while appearing to be distinct.
 //
 // Aliases map several friendly names onto the same Header; they are genuinely
 // the same backend and cost nothing extra.
 var MODELS = map[string]Model{
-	// 4 Carbon — the frontier tier, longest and most expensive output.
-	"gemini-4-carbon": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Frontier model for complex tasks (Gemini 4 Carbon, requires a paid cookie)",
-	},
+	// num 8 — 4 Argon, the code/analysis tier.
 	"gemini-4-argon": {
 		Mode:   8,
 		Think:  4,
 		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-carbon",
+		Desc:   "Frontier model for code and analysis (Gemini 4 Argon)",
 	},
-	"carbon": {
+	"argon": {
 		Mode:   8,
 		Think:  4,
 		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-carbon",
+		Desc:   "Alias for gemini-4-argon",
 	},
 	"gemini-4": {
 		Mode:   8,
 		Think:  4,
 		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-carbon",
+		Desc:   "Alias for gemini-4-argon",
 	},
 
-	// 3.1 Pro — focused, concise answers.
+	// num 3 — 3.1 Pro, focused research answers.
 	"gemini-3.1-pro": {
 		Mode:   3,
 		Think:  4,
 		Header: "e6fa609c3fa255c0",
-		Desc:   "Pro model with detailed research answers (requires a paid cookie)",
+		Desc:   "Pro model with detailed research answers",
 	},
 	"gemini-3.1-pro-enhanced": {
 		Mode:   3,

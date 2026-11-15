@@ -171,20 +171,21 @@ Supports Google native API endpoints:
 
 ## Available Models
 
-These four backends are what a Gemini web account actually exposes, as reported by
-the `otAQ7b` discovery RPC. Longer aliases point at the same backend and cost
-nothing extra.
+The Gemini web UI offers exactly four models to a standard account. They come from
+the UI selector embedded in the `otAQ7b` payload, not from the model list at
+`payload[15]` — that list also advertises "4 Carbon", which is gated by the
+`carbon_multi_ultra_pro_policy` entitlement and is not selectable without it.
 
-| Model                 | Backend id         | Description                             | Output observed |
-| --------------------- | ------------------ | --------------------------------------- | --------------- |
-| `gemini-4-carbon`     | `95a4c0abcba24364` | Frontier tier, most complex work        | ~2200 words     |
-| `carbon`, `gemini-4-argon`, `gemini-4` | same | Aliases for gemini-4-carbon | ~2200 words |
-| `gemini-3.1-pro`      | `e6fa609c3fa255c0` | Pro, focused research answers           | ~680 words      |
-| `pro`, `gemini-3.1-pro-enhanced` | same    | Aliases for gemini-3.1-pro              | ~680 words      |
-| `gemini-4-hydrogen`   | `56fdd199312815e2` | Everyday general-purpose (default)      | ~1200 words     |
-| `hydrogen`, `gemini-3.5-flash` | same     | Aliases for gemini-4-hydrogen           | ~1200 words     |
-| `gemini-3.5-flash-lite` | `8c46e95b1a07cecc` | Fastest, lightweight quick answers    | ~1300 words     |
-| `flash-lite`, `gemini-flash-lite` | same   | Aliases for gemini-3.5-flash-lite       | ~1300 words     |
+| Model                 | Backend id         | UI label             | Description              |
+| --------------------- | ------------------ | -------------------- | ------------------------ |
+| `gemini-4-argon`      | `95a4c0abcba24364` | 4 Argon              | Code & analysis          |
+| `argon`, `gemini-4`   | same               |                      | Aliases                  |
+| `gemini-3.1-pro`      | `e6fa609c3fa255c0` | 3.1 Pro              | Detailed research        |
+| `pro`, `gemini-3.1-pro-enhanced` | same    |                      | Aliases                  |
+| `gemini-4-hydrogen`   | `56fdd199312815e2` | 4 Hydrogen           | Everyday help (default)  |
+| `hydrogen`, `gemini-3.5-flash` | same     |                      | Aliases                  |
+| `gemini-3.5-flash-lite` | `8c46e95b1a07cecc` | 3.5 Flash-Lite     | Quick answers            |
+| `flash-lite`, `gemini-flash-lite` | same  |                      | Aliases                  |
 
 > Every entry must carry a `Header`. Without it the upstream ignores the mode
 > field and silently answers with the default model, so names that look distinct
