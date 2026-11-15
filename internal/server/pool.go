@@ -397,6 +397,9 @@ func (p *Pool) StartBackground(ctx context.Context) {
 						_ = p.RefreshXSRFToken(a)
 					}
 				}
+				// Google rotates SIDCC roughly every 10 minutes and invalidates the
+				// previous chain, so keep it moving even with no traffic.
+				p.RotateCookiesAll(ctx)
 				_ = p.RefreshAllQuotas(ctx)
 			}
 		}
@@ -938,4 +941,29 @@ func (p *Pool) QueueTimeout() time.Duration {
 		return time.Duration(p.cfg.QueueTimeoutSec) * time.Second
 	}
 	return 0
+}
+
+// RotateCookiesAll runs one rotation cycle for every account.
+//
+// Passive rotation (replaying Set-Cookie) only happens while requests are in
+// flight, so an idle service would still let its SIDCC chain go stale. This is
+// the active half: it keeps the session fresh even with no traffic.
+func (p *Pool) RotateCookiesAll(ctx context.Context) {
+	for _, a := range p.accounts {
+		if a.Client == nil {
+			continue
+		}
+		before, _ := a.Client.Cookies.JarStats()
+		if err := a.Client.RotateCookies(ctx); err != nil {
+			p.logf("account %s: cookie rotation failed: %v", a.Label, err)
+			continue
+		}
+		after, names := a.Client.Cookies.JarStats()
+		if after > before {
+			// Only log when something actually moved, otherwise the periodic
+			// cycle would be pure noise.
+			p.logf("account %s: cookie rotated (%d values refreshed, %d tracked)",
+				a.Label, after-before, names)
+		}
+	}
 }

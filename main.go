@@ -75,8 +75,15 @@ func main() {
 
 	app := server.New(cfg, currentVersion)
 
+	// Startup work gets a bounded budget; the long-lived background loop must not
+	// inherit it, or it would exit as soon as the startup phase is over.
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancelStartup()
+
+	// backgroundCtx lives until shutdown. Cookie rotation and quota refresh run on
+	// it, so tying them to startupCtx would silently stop them after 90s.
+	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
+	defer cancelBackground()
 
 	// BL refresh is global (one frontend build id for all accounts).
 	probe := gemini.NewClient(cfg)
@@ -109,7 +116,7 @@ func main() {
 		log.Printf("account %s (u/%s): %s models=%d", acct.Label, acct.AuthUser, quotaDesc, modelsFound)
 	}
 
-	app.Pool.StartBackground(startupCtx)
+	app.Pool.StartBackground(backgroundCtx)
 
 	modelKeys := make([]string, 0, len(models.MODELS))
 	for k := range models.MODELS {
@@ -168,6 +175,7 @@ func main() {
 	log.Println("Shutting down server gracefully...")
 	app.Pool.Close()
 	app.Pool.CloseConversations()
+	cancelBackground()
 	cancelStartup()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

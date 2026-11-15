@@ -40,6 +40,13 @@ type Config struct {
 	Impersonate       string   `json:"impersonate"`
 	TemporaryChats    bool     `json:"temporary_chats"`
 
+	// Cookie rotation. Google refreshes SIDCC/PSIDTS every ~10 minutes and
+	// rejects a stale chain, so the service renews it on its own. These two
+	// identify the "browser" doing the rotating; both are optional and derived
+	// when left empty.
+	ChromeDeviceID string `json:"chrome_device_id"`
+	GaiaID         string `json:"gaia_id"`
+
 	// Multi-account pool. When Accounts is empty the legacy single-account
 	// fields above drive a one-entry pool, so existing configs keep working.
 	Accounts        []AccountConfig `json:"accounts"`
@@ -124,6 +131,8 @@ func Load(path string) (Config, error) {
 		AutoXSRF          *bool             `json:"auto_xsrf"`
 		MaxConcurrent     *int              `json:"max_concurrent"`
 		QueueTimeoutSec   *int              `json:"queue_timeout_sec"`
+		ChromeDeviceID    *string           `json:"chrome_device_id"`
+		GaiaID            *string           `json:"gaia_id"`
 		ConvCache         *bool             `json:"conv_cache"`
 		ConvCacheTTLDay   *int              `json:"conv_cache_ttl_days"`
 		ConvCachePath     *string           `json:"conv_cache_path"`
@@ -195,6 +204,12 @@ func Load(path string) (Config, error) {
 	}
 	if aux.QueueTimeoutSec != nil {
 		cfg.QueueTimeoutSec = *aux.QueueTimeoutSec
+	}
+	if aux.ChromeDeviceID != nil {
+		cfg.ChromeDeviceID = *aux.ChromeDeviceID
+	}
+	if aux.GaiaID != nil {
+		cfg.GaiaID = *aux.GaiaID
 	}
 	if aux.ConvCache != nil {
 		cfg.ConvCache = *aux.ConvCache
