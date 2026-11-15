@@ -83,7 +83,10 @@ func NewClient(cfg config.Config) *Client {
 
 		req = &http.Client{
 			Transport: transport,
-			Timeout:   time.Duration(cfg.RequestTimeoutSec) * time.Second,
+			// No Client.Timeout: it is a total deadline that would cut a healthy
+			// long generation mid-stream (Argon legitimately runs past 200s).
+			// Per-request deadlines are applied per attempt instead: a response
+			// header deadline, plus an idle guard on the response body.
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -239,18 +242,22 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string, co
 	var meta ConversationMeta
 
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
-		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
+		attemptCtx, cancelAttempt := c.attemptContext()
+		req, err := http.NewRequestWithContext(attemptCtx, "POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
+			cancelAttempt()
 			return "", nil, err
 		}
 		req.Header = headers.Clone()
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
+			cancelAttempt()
+			lastErr = c.classifyTransportError(attemptCtx, err)
 		} else {
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
+				cancelAttempt()
 				// 405 means the endpoint did not accept this verb/state. Refresh
 				// the build id and retry once regardless of whether it changed:
 				// a 405 is often transient, and the previous code only retried
@@ -277,10 +284,13 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string, co
 					return "", nil, err
 				}
 			} else {
-				rawBytes, err := io.ReadAll(resp.Body)
+				guard := newIdleGuard(c.idleTimeout(), cancelAttempt)
+				rawBytes, err := io.ReadAll(&guardedReader{r: resp.Body, g: guard})
 				_ = resp.Body.Close()
+				guard.stop()
+				cancelAttempt()
 				if err != nil {
-					lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
+					lastErr = c.classifyTransportError(attemptCtx, err)
 				} else {
 					text, err := ExtractResponseTextAndMeta(string(rawBytes), &meta)
 					if err != nil {
@@ -338,18 +348,22 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
 		parser.ResetBuffer()
 
-		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
+		attemptCtx, cancelAttempt := c.attemptContext()
+		req, err := http.NewRequestWithContext(attemptCtx, "POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
+			cancelAttempt()
 			return nil, err
 		}
 		req.Header = headers.Clone()
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
+			cancelAttempt()
+			lastErr = c.classifyTransportError(attemptCtx, err)
 		} else {
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
+				cancelAttempt()
 				// Same 405 handling as the non-streaming path: refresh the build id
 				// and retry once even when the value did not change.
 				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
@@ -372,12 +386,27 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 					return nil, err
 				}
 			} else {
-				err = c.streamAttempt(resp.Body, parser, emit)
+				guard := newIdleGuard(c.idleTimeout(), cancelAttempt)
+				err = c.streamAttempt(&guardedReader{r: resp.Body, g: guard}, parser, emit)
 				_ = resp.Body.Close()
+				guard.stop()
+				cancelAttempt()
+
 				if err == nil {
 					return parser.Meta, nil
 				}
 				if isClientDisconnect(err) {
+					return parser.Meta, err
+				}
+				// Once any text has reached the client the upstream conversation
+				// already exists. Retrying would generate a second reply for the
+				// same chat: the server keeps that turn while the local cache never
+				// learns about it, so the two drift apart. Fail instead and let the
+				// caller decide.
+				if parser.Emitted() {
+					if guard.exceeded() {
+						c.Logf("stream stalled after %d chars; not retrying to keep local and remote history consistent", parser.EmittedLen())
+					}
 					return parser.Meta, err
 				}
 				lastErr = err
@@ -466,4 +495,21 @@ func IsCredentialError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// IsTimeoutError reports whether the attempt died from silence rather than from
+// a real failure: either the response headers never arrived, or the body stalled
+// for longer than the idle budget. This is the case where retrying is safe only
+// if nothing has been emitted yet.
+func IsTimeoutError(err error) bool {
+	ue, ok := err.(*UpstreamError)
+	if !ok {
+		return false
+	}
+	if ue.Kind == "timeout" {
+		return true
+	}
+	// A body that stalls surfaces as a transport error wrapping a context
+	// deadline; keep the string check narrow so real transport faults stay out.
+	return ue.Kind == "transport" && strings.Contains(ue.Msg, "context deadline exceeded")
 }

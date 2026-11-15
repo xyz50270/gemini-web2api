@@ -10,6 +10,11 @@ type StreamParser struct {
 	prevText string
 	buf      string
 
+	// emitted counts how much text has already been handed to the client. It
+	// gates retries: once a reply is partially delivered, retrying would create
+	// a second upstream turn that the local cache never learns about.
+	emitted int
+
 	// Meta collects the conversation ids Google issues alongside the text so a
 	// follow-up request can continue this chat server-side.
 	Meta *ConversationMeta
@@ -18,6 +23,12 @@ type StreamParser struct {
 func NewStreamParser() *StreamParser {
 	return &StreamParser{Meta: &ConversationMeta{}}
 }
+
+// Emitted reports whether any text has already been delivered downstream.
+func (p *StreamParser) Emitted() bool { return p.emitted > 0 }
+
+// EmittedLen is the number of characters already delivered, for logging.
+func (p *StreamParser) EmittedLen() int { return p.emitted }
 
 // ResetBuffer clears the line buffer before a retry attempt while preserving prevText across retries.
 func (p *StreamParser) ResetBuffer() {
@@ -55,6 +66,7 @@ func (p *StreamParser) Feed(chunk string) ([]string, error) {
 			delta := CleanText(t[len(p.prevText):], false)
 			p.prevText = t
 			if delta != "" {
+				p.emitted += len(delta)
 				deltas = append(deltas, delta)
 			}
 		}
