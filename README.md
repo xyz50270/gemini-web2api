@@ -188,9 +188,12 @@ entry carries a `Header`, which is what actually routes a request: without it
 upstream ignores the mode field and answers with its default model.
 
 Aliases used by earlier versions (`argon`, `pro`, `gemini-3.5-flash`, …) were
-removed so the discovery list cannot imply models an account cannot select. A
-request naming one of them falls back to `gemini-4-hydrogen` and sets
-`X-Model-Fallback: true` in the response.
+removed so the discovery list cannot imply models an account cannot select.
+
+A request naming an unknown model is rejected with HTTP 400 listing the
+available names. The proxy never substitutes a different model: answering with
+something other than what was asked for makes the response untrustworthy and
+hides caller mistakes. Omitting `model` entirely still uses `default_model`.
 
 ### Thinking Depth
 
@@ -204,9 +207,11 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 ### Model Inspection Headers
 
-Every API response (both JSON and streaming SSE) includes HTTP response headers indicating actual model routing:
-- `X-Resolved-Model`: The backend model identifier actually routed to (e.g. `gemini-4-argon`).
-- `X-Model-Fallback: true`: Included whenever an unmapped model was requested and fell back to the default model.
+Every API response (both JSON and streaming SSE) includes a header indicating the model that was routed:
+- `X-Resolved-Model`: the backend model identifier actually used (e.g. `gemini-4-argon`).
+
+There is no fallback header because there is no fallback: an unknown model is
+rejected with 400 rather than answered by a different one.
 
 ## Advanced Features (Go Exclusive)
 

@@ -50,7 +50,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		modelName = a.Cfg.DefaultModel
 	}
 
-	resolved, err := models.Resolve(modelName, a.Cfg.DefaultModel)
+	resolved, err := models.Resolve(modelName)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return

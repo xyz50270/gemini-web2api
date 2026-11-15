@@ -19,9 +19,6 @@ var errClientGone = errors.New("client disconnected")
 
 func setModelHeaders(w http.ResponseWriter, resolved models.Resolved) {
 	w.Header().Set("X-Resolved-Model", resolved.Name)
-	if resolved.Fallback {
-		w.Header().Set("X-Model-Fallback", "true")
-	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

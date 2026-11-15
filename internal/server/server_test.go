@@ -205,7 +205,7 @@ func TestModelHeaders(t *testing.T) {
 	app := New(cfg, "test")
 	handler := app.Handler()
 
-	// 1. Known model: gemini-4-argon
+	// 1. Known model: resolved name is echoed, no fallback header exists anymore.
 	bodyKnown := `{"model":"gemini-4-argon","messages":[{"role":"user","content":"hi"}]}`
 	req1 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(bodyKnown))
 	req1.Header.Set("Content-Type", "application/json")
@@ -215,22 +215,22 @@ func TestModelHeaders(t *testing.T) {
 	if got := rec1.Header().Get("X-Resolved-Model"); got != "gemini-4-argon" {
 		t.Errorf("Expected X-Resolved-Model=gemini-4-argon, got %q", got)
 	}
-	if got := rec1.Header().Get("X-Model-Fallback"); got != "" {
-		t.Errorf("Expected X-Model-Fallback to be empty for known model, got %q", got)
-	}
 
-	// 2. Unknown model: should fallback and set X-Model-Fallback: true
+	// 2. Unknown model: rejected with 400, never answered by another model.
 	bodyUnknown := `{"model":"gemini-9.9-fake","messages":[{"role":"user","content":"hi"}]}`
 	req2 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(bodyUnknown))
 	req2.Header.Set("Content-Type", "application/json")
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req2)
 
-	if got := rec2.Header().Get("X-Resolved-Model"); got != "gemini-4-hydrogen" {
-		t.Errorf("Expected X-Resolved-Model=gemini-4-hydrogen, got %q", got)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("unknown model = %d, want 400", rec2.Code)
 	}
-	if got := rec2.Header().Get("X-Model-Fallback"); got != "true" {
-		t.Errorf("Expected X-Model-Fallback=true for unknown model, got %q", got)
+	if !strings.Contains(rec2.Body.String(), "does not exist") {
+		t.Errorf("body = %s, want a does-not-exist error", rec2.Body.String())
+	}
+	if got := rec2.Header().Get("X-Resolved-Model"); got != "" {
+		t.Errorf("a rejected request must not report a resolved model, got %q", got)
 	}
 }
 

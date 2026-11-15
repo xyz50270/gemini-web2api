@@ -2,7 +2,7 @@ package models
 
 import (
 	"fmt"
-	"log"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -44,8 +44,11 @@ type Model struct {
 // Only the four canonical names are registered. Aliases were removed on
 // purpose: /v1/models is a discovery endpoint, so it must list what an account
 // can actually select in the web UI. Extra names made the list look like twelve
-// models when there are four backends, and a request naming a removed alias now
-// falls back loudly (X-Model-Fallback) instead of silently resolving.
+// models when there are four backends.
+//
+// A request naming anything else is rejected with 400 rather than quietly
+// answered by a different model: a silent substitution makes the response
+// untrustworthy and hides caller mistakes.
 var MODELS = map[string]Model{
 	// num 8 — 4 Argon, the code/analysis tier.
 	"gemini-4-argon": {
@@ -81,22 +84,26 @@ var MODELS = map[string]Model{
 }
 
 type Resolved struct {
-	Name     string
-	Mode     int
-	Think    int
-	Header   string
-	Fallback bool
-	Extra    map[int]any
+	Name   string
+	Mode   int
+	Think  int
+	Header string
+	Extra  map[int]any
 }
 
 const DefaultModelName = "gemini-4-hydrogen"
 
-// Resolve maps a requested model string to its corresponding backend configuration.
-// It supports model name suffixes like "@think=N" (e.g. "gemini-3.6-flash@think=0")
-// to dynamically override the model's default thinking depth without modifying the model mapping.
-func Resolve(modelName, defaultName string) (Resolved, error) {
-	if defaultName == "" {
-		defaultName = DefaultModelName
+// Resolve maps a requested model string to its backend configuration.
+//
+// A "@think=N" suffix (e.g. "gemini-4-argon@think=0") overrides the thinking
+// depth without changing the model mapping.
+//
+// An empty model name resolves to DefaultModelName. Any other unknown name is an
+// error: substituting a different model would silently change what the caller
+// asked for.
+func Resolve(modelName string) (Resolved, error) {
+	if modelName == "" {
+		modelName = DefaultModelName
 	}
 
 	var thinkOverride *int
@@ -111,12 +118,12 @@ func Resolve(modelName, defaultName string) (Resolved, error) {
 	}
 
 	cfg, exists := MODELS[modelName]
-	fallback := false
 	if !exists {
-		log.Printf("Unknown model '%s', falling back to '%s'", modelName, defaultName)
-		modelName = defaultName
-		cfg = MODELS[defaultName]
-		fallback = true
+		// No silent fallback: answering with a different model than the caller
+		// asked for hides configuration mistakes and makes the response
+		// untrustworthy. Reject the request so the error is visible.
+		return Resolved{}, fmt.Errorf("model %q does not exist; available models: %s",
+			modelName, AvailableModels())
 	}
 
 	thinkMode := cfg.Think
@@ -125,11 +132,21 @@ func Resolve(modelName, defaultName string) (Resolved, error) {
 	}
 
 	return Resolved{
-		Name:     modelName,
-		Mode:     cfg.Mode,
-		Think:    thinkMode,
-		Header:   cfg.Header,
-		Fallback: fallback,
-		Extra:    cfg.Extra,
+		Name:   modelName,
+		Mode:   cfg.Mode,
+		Think:  thinkMode,
+		Header: cfg.Header,
+		Extra:  cfg.Extra,
 	}, nil
+}
+
+// AvailableModels returns the registered model names, sorted, for error messages
+// and the discovery endpoint.
+func AvailableModels() string {
+	names := make([]string, 0, len(MODELS))
+	for name := range MODELS {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
