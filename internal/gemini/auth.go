@@ -5,8 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -131,4 +134,57 @@ func AccountPrefix(authUser string) string {
 		return ""
 	}
 	return "/u/" + authUser
+}
+
+var (
+	reSNlM0e = regexp.MustCompile(`"SNlM0e":"([^"]+)"`)
+	reFdrFJe = regexp.MustCompile(`"FdrFJe":"([^"]+)"`)
+)
+
+// FetchPageAuth logs into the Gemini app page for one account and extracts the
+// tokens the StreamGenerate endpoint needs: SNlM0e (sent as the `at` form field)
+// and FdrFJe (sent as `f.sid`). The XSRF token rotates, so this is called again
+// whenever a request comes back with a 400.
+func FetchPageAuth(req Requester, info CookieInfo, authUser string) (xsrfToken, fSid string, err error) {
+	if req == nil {
+		return "", "", fmt.Errorf("no requester configured")
+	}
+
+	pageURL := fmt.Sprintf("https://gemini.google.com%s/app", AccountPrefix(authUser))
+	httpReq, err := http.NewRequest("GET", pageURL, nil)
+	if err != nil {
+		return "", "", err
+	}
+	httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	if info.Cookie != "" {
+		httpReq.Header.Set("Cookie", info.Cookie)
+	}
+	if authUser != "" {
+		httpReq.Header.Set("X-Goog-AuthUser", authUser)
+	}
+
+	resp, err := req.Do(httpReq)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return "", "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("app page status %d", resp.StatusCode)
+	}
+
+	if m := reSNlM0e.FindSubmatch(body); len(m) > 1 {
+		xsrfToken = string(m[1])
+	}
+	if m := reFdrFJe.FindSubmatch(body); len(m) > 1 {
+		fSid = string(m[1])
+	}
+	if xsrfToken == "" {
+		return "", "", fmt.Errorf("SNlM0e not found in app page")
+	}
+	return xsrfToken, fSid, nil
 }

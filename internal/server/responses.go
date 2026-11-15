@@ -90,17 +90,8 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Upload images to Gemini storage.
-	var fileRefs []string
-	if len(images) > 0 {
-		fileRefs, err = a.uploadImages(images)
-		if err != nil {
-			a.Logf("Image upload error: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
-			return
-		}
-	}
-
+	// Image upload is performed inside the pool against the account that
+	// actually serves the request.
 	gemOpt := gemini.ModelOptions{
 		ModelName:   resolved.Name,
 		ModelID:     resolved.Mode,
@@ -109,8 +100,11 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		Extra:       resolved.Extra,
 	}
 
-	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
+	text, err := a.Pool.Generate(prompt, gemOpt, images)
 	if err != nil {
+		if writeExhaustedJSON(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
 	}

@@ -48,16 +48,9 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Upload images to Gemini storage.
-	var fileRefs []string
-	if len(images) > 0 {
-		fileRefs, err = a.uploadImages(images)
-		if err != nil {
-			a.Logf("Image upload error: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
-			return
-		}
-	}
+	// Image upload happens inside the pool, against whichever account serves
+	// the request, so file references stay bound to that account's session.
+	promptImages := images
 
 	gemOpt := gemini.ModelOptions{
 		ModelName:   resolved.Name,
@@ -73,11 +66,11 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	isToolNone := isStr && strChoice == "none"
 
 	if req.Stream && (len(req.Tools) == 0 || isToolNone) {
-		if !startSSE(w) {
-			return
-		}
+		// SSE is started lazily on the first real delta. Until anything has
+		// been written the request can still fail over to another account and,
+		// failing that, answer with a proper JSON error status.
+		started := false
 
-		// Emit first chunk with role to match OpenAI streaming protocol.
 		firstChunk := models.OpenAIChatResponse{
 			ID:      cid,
 			Object:  "chat.completion.chunk",
@@ -93,9 +86,15 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
-		_ = writeSSEData(w, firstChunk)
 
-		emitErr := a.Gem.GenerateStream(prompt, gemOpt, fileRefs, func(delta string) error {
+		emitErr := a.Pool.GenerateStream(prompt, gemOpt, promptImages, func(delta string) error {
+			if !started {
+				started = true
+				if !startSSE(w) {
+					return errClientGone
+				}
+				_ = writeSSEData(w, firstChunk)
+			}
 			chunk := models.OpenAIChatResponse{
 				ID:      cid,
 				Object:  "chat.completion.chunk",
@@ -114,7 +113,18 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			return writeSSEData(w, chunk)
 		})
 
+		if emitErr == errClientGone {
+			return
+		}
+
 		if emitErr == nil {
+			if !started {
+				// Upstream returned no text; still produce a valid stream.
+				if !startSSE(w) {
+					return
+				}
+				_ = writeSSEData(w, firstChunk)
+			}
 			stopReason := "stop"
 			endChunk := models.OpenAIChatResponse{
 				ID:      cid,
@@ -131,14 +141,25 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = writeSSEData(w, endChunk)
 			_ = writeSSEDone(w)
-		} else {
-			a.Logf("Chat stream error: %v", emitErr)
+			return
 		}
+
+		if !started {
+			if writeExhaustedJSON(w, emitErr) {
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", emitErr)}})
+			return
+		}
+		a.Logf("Chat stream error: %v", emitErr)
 		return
 	}
 
-	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
+	text, err := a.Pool.Generate(prompt, gemOpt, promptImages)
 	if err != nil {
+		if writeExhaustedJSON(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
 	}

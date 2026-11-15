@@ -299,6 +299,77 @@ Create `config.json` in the same directory:
 
 When `api_keys` is empty `[]`, authentication is disabled. When keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>`.
 
+## Multiple Accounts with Automatic Failover
+
+One container can serve several Google accounts signed in under the same browser
+profile. Each account is addressed by its `/u/<N>` index and gets its own
+`gemini.Client` (cookie, page token, model discovery) inside a shared account pool.
+
+```json
+{
+  "cookie_file": "/app/cookie.json",
+  "accounts": [
+    { "label": "primary",   "auth_user": "0" },
+    { "label": "secondary", "auth_user": "1" }
+  ],
+  "quota_threshold": 0.95,
+  "quota_refresh_sec": 300,
+  "auto_xsrf": true
+}
+```
+
+All accounts may share one `cookie_file`: a browser cookie export normally carries
+every account of that profile, and `auth_user` selects which one a request uses.
+
+**Selection is sticky, not balanced.** The pool is ordered; the first account serves
+traffic until its usage reaches `quota_threshold`, then requests move to the next.
+When the primary's 5-hour or weekly window refreshes and usage drops back below the
+threshold, it becomes primary again automatically.
+
+**Usage source.** Every `quota_refresh_sec` the pool queries Gemini's
+`GEMINI_WEB_GRAPHQL/executeQuery` endpoint per account, which reports
+`GXU_FIVE_HOURLY` and `GXU_WEEKLY` utilisation plus the next window refresh time.
+That query needs only the session cookie, not the XSRF token, so it stays cheap.
+
+**Live failover.** Besides the scheduled poll, an actual HTTP 429 or 403 from upstream
+marks the account as cooling down for 10 minutes and the request is retried against
+the next account. A 400 (usually a stale XSRF token) triggers a token refresh first.
+Transport errors and 5xx are retried on the same account, not switched.
+
+**Streaming.** Failover only happens before the first token reaches the client. Once
+partial output has been sent the stream is committed and the error is surfaced
+as-is, since a second account would restart the text.
+
+**Inspect state** with `GET /v1/accounts` (protected by `api_keys`):
+
+```json
+{
+  "object": "list",
+  "quota_threshold": 0.95,
+  "quota_refresh_sec": 300,
+  "accounts": [
+    {
+      "index": 0, "label": "primary", "auth_user": "0", "available": false,
+      "tier": "TIER1", "used": 0.97,
+      "five_hour": { "poolType": "GXU_FIVE_HOURLY", "percentageUsed": 0.97,
+                     "windowRefreshesAt": "2026-11-15T14:14:39Z" },
+      "weekly":    { "poolType": "GXU_WEEKLY", "percentageUsed": 0.31,
+                     "windowRefreshesAt": "2026-11-18T00:14:39Z" },
+      "reset_at": "2026-11-15T14:14:39Z"
+    },
+    { "index": 1, "label": "secondary", "auth_user": "1", "available": true }
+  ]
+}
+```
+
+When every account is over the threshold, chat requests short-circuit with HTTP
+`429` and `code: "all_accounts_exhausted"`, listing each account's usage and reset
+time — no upstream request is made.
+
+`auto_xsrf` (default `true`) lets the service fetch each account's `SNlM0e` page
+token on startup and refresh it when a 400 indicates it went stale, so tokens do
+not need to be pasted by hand.
+
 ## Proxy
 
 If you cannot access `gemini.google.com` directly, configure a proxy:

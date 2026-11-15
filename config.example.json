@@ -15,5 +15,10 @@
   "proxy": null,
   "log_requests": true,
   "impersonate": "",
-  "temporary_chats": false
+  "temporary_chats": false,
+
+  "accounts": [],
+  "quota_threshold": 0.95,
+  "quota_refresh_sec": 300,
+  "auto_xsrf": true
 }

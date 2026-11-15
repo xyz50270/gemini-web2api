@@ -6,6 +6,23 @@ import (
 	"path/filepath"
 )
 
+// AccountConfig describes one Google account slot served by the same cookie set.
+// AuthUser is the /u/<N> index; the cookie itself usually carries every logged-in
+// account of the browser profile, so several entries can share one CookieFile.
+type AccountConfig struct {
+	Label      string `json:"label"`
+	AuthUser   string `json:"auth_user"`
+	XSRFToken  string `json:"xsrf_token"`
+	CookieFile string `json:"cookie_file"`
+	Enabled    *bool  `json:"enabled"`
+}
+
+// IsEnabled reports whether the account participates in the pool. A nil Enabled
+// means "enabled", so accounts work without spelling out the field.
+func (a AccountConfig) IsEnabled() bool {
+	return a.Enabled == nil || *a.Enabled
+}
+
 type Config struct {
 	Port              int      `json:"port"`
 	Host              string   `json:"host"`
@@ -22,6 +39,13 @@ type Config struct {
 	APIKeys           []string `json:"api_keys"`
 	Impersonate       string   `json:"impersonate"`
 	TemporaryChats    bool     `json:"temporary_chats"`
+
+	// Multi-account pool. When Accounts is empty the legacy single-account
+	// fields above drive a one-entry pool, so existing configs keep working.
+	Accounts        []AccountConfig `json:"accounts"`
+	QuotaThreshold  float64         `json:"quota_threshold"`
+	QuotaRefreshSec int             `json:"quota_refresh_sec"`
+	AutoXSRF        bool            `json:"auto_xsrf"`
 }
 
 func Default() Config {
@@ -41,6 +65,10 @@ func Default() Config {
 		APIKeys:           []string{},
 		Impersonate:       "",
 		TemporaryChats:    false,
+		Accounts:          []AccountConfig{},
+		QuotaThreshold:    0.95,
+		QuotaRefreshSec:   300,
+		AutoXSRF:          true,
 	}
 }
 
@@ -71,9 +99,13 @@ func Load(path string) (Config, error) {
 		LogRequests       *bool     `json:"log_requests"`
 		CookieFile        *string   `json:"cookie_file"`
 		Proxy             *string   `json:"proxy"`
-		APIKeys           *[]string `json:"api_keys"`
-		Impersonate       *string   `json:"impersonate"`
-		TemporaryChats    *bool     `json:"temporary_chats"`
+		APIKeys           *[]string         `json:"api_keys"`
+		Impersonate       *string           `json:"impersonate"`
+		TemporaryChats    *bool             `json:"temporary_chats"`
+		Accounts          *[]AccountConfig  `json:"accounts"`
+		QuotaThreshold    *float64          `json:"quota_threshold"`
+		QuotaRefreshSec   *int              `json:"quota_refresh_sec"`
+		AutoXSRF          *bool             `json:"auto_xsrf"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -125,8 +157,54 @@ func Load(path string) (Config, error) {
 	if aux.TemporaryChats != nil {
 		cfg.TemporaryChats = *aux.TemporaryChats
 	}
+	if aux.Accounts != nil {
+		cfg.Accounts = *aux.Accounts
+	}
+	if aux.QuotaThreshold != nil {
+		cfg.QuotaThreshold = *aux.QuotaThreshold
+	}
+	if aux.QuotaRefreshSec != nil {
+		cfg.QuotaRefreshSec = *aux.QuotaRefreshSec
+	}
+	if aux.AutoXSRF != nil {
+		cfg.AutoXSRF = *aux.AutoXSRF
+	}
 
 	return cfg, nil
+}
+
+// ResolvedAccounts returns the effective account list. When Accounts is empty the
+// legacy single-account fields are turned into a one-entry list so callers can
+// always iterate a pool.
+func (c Config) ResolvedAccounts() []AccountConfig {
+	var out []AccountConfig
+	for _, a := range c.Accounts {
+		if !a.IsEnabled() {
+			continue
+		}
+		if a.Label == "" {
+			a.Label = "account-" + a.AuthUser
+			if a.AuthUser == "" {
+				a.Label = "default"
+			}
+		}
+		if a.CookieFile == "" {
+			a.CookieFile = c.CookieFile
+		}
+		if a.XSRFToken == "" {
+			a.XSRFToken = c.XSRFToken
+		}
+		out = append(out, a)
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return []AccountConfig{{
+		Label:      "default",
+		AuthUser:   c.AuthUser,
+		XSRFToken:  c.XSRFToken,
+		CookieFile: c.CookieFile,
+	}}
 }
 
 func Find() string {

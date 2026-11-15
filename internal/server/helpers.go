@@ -3,13 +3,19 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
+
+// errClientGone signals that the SSE response could not be started because the
+// client is no longer there. It must not be treated as an upstream failure.
+var errClientGone = errors.New("client disconnected")
 
 func setModelHeaders(w http.ResponseWriter, resolved models.Resolved) {
 	w.Header().Set("X-Resolved-Model", resolved.Name)
@@ -103,16 +109,26 @@ func (a *App) uploadImages(images []format.Image) ([]string, error) {
 		return nil, nil
 	}
 
-	tokens := a.Tokens.Get()
+	acct, err := a.Pool.Pick(nil)
+	if err != nil {
+		return nil, err
+	}
+	return uploadImagesWith(acct.Tokens, acct.Client, a.Pool.Requester(), images)
+}
+
+// uploadImagesWith uploads images using one specific account, so file references
+// belong to the same session that will later send the prompt.
+func uploadImagesWith(tokens *multimodal.TokenCache, client *gemini.Client, req gemini.Requester, images []format.Image) ([]string, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+
+	pageTokens := tokens.Get()
 	var fileRefs []string
 
-	requester := a.Gem.HTTP
+	requester := client.HTTP
 	if requester == nil {
-		if a.HTTPClient != nil {
-			requester = a.HTTPClient
-		} else {
-			requester = createHTTPClient(a.Cfg)
-		}
+		requester = req
 	}
 
 	for i, img := range images {
@@ -140,7 +156,7 @@ func (a *App) uploadImages(images []format.Image) ([]string, error) {
 			mime = multimodal.DetectImageMime(data)
 		}
 
-		ref, err := multimodal.UploadImage(requester, tokens, data, mime, a.Gem.Cookies, a.Cfg.AuthUser)
+		ref, err := multimodal.UploadImage(requester, pageTokens, data, mime, client.Cookies, client.Cfg.AuthUser)
 		if err != nil {
 			return nil, fmt.Errorf("image %d upload failed: %w", i, err)
 		}

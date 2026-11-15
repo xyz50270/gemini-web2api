@@ -44,6 +44,11 @@ type Client struct {
 	blMu    sync.Mutex
 	bl      string
 
+	// FailFast makes credential/quota failures (400, 401, 403, 429) return
+	// immediately instead of burning the retry budget on the same account, so
+	// the caller can fail over to another account.
+	FailFast bool
+
 	modelsMu      sync.RWMutex
 	discovered    []DiscoveredModel
 	accountCap    int
@@ -254,6 +259,11 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 					}
 				}
 				lastErr = err
+				// Hand credential/quota failures straight back to the pool so it
+				// can switch accounts instead of hammering this one.
+				if c.FailFast && (IsCredentialError(err) || IsQuotaError(err)) {
+					return "", err
+				}
 			} else {
 				rawBytes, err := io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
@@ -340,6 +350,9 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 					}
 				}
 				lastErr = err
+				if c.FailFast && (IsCredentialError(err) || IsQuotaError(err)) {
+					return err
+				}
 			} else {
 				err = c.streamAttempt(resp.Body, parser, emit)
 				_ = resp.Body.Close()
@@ -397,4 +410,42 @@ func isClientDisconnect(err error) bool {
 		return false
 	}
 	return true
+}
+
+// IsQuotaError reports whether err looks like an account-level limit rather
+// than a transient or request-level failure. Such errors are worth trying on a
+// different account; a transport error or a 5xx is not.
+func IsQuotaError(err error) bool {
+	ue, ok := err.(*UpstreamError)
+	if !ok {
+		return false
+	}
+	switch ue.Status {
+	case http.StatusTooManyRequests, // 429: explicit rate limit / quota
+		http.StatusForbidden: // 403: upstream refuses this session
+		return true
+	}
+	if ue.Kind == "bard" {
+		// A body-level rejection can be a quota notice too; the prompt itself
+		// being refused would also land here, but trying the next account is
+		// cheap compared to returning a hard failure.
+		return strings.Contains(ue.Msg, "BardErrorInfo")
+	}
+	return false
+}
+
+// IsCredentialError reports whether err points at a broken session for this
+// account (expired XSRF token, revoked cookie), which is worth refreshing.
+func IsCredentialError(err error) bool {
+	ue, ok := err.(*UpstreamError)
+	if !ok {
+		return false
+	}
+	switch ue.Status {
+	case http.StatusBadRequest, // 400: usually a stale `at` (XSRF) token
+		http.StatusUnauthorized,
+		http.StatusForbidden:
+		return true
+	}
+	return false
 }

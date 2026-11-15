@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
@@ -55,5 +56,25 @@ func (a *App) handleGoogleModels(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"models": modelList,
+	})
+}
+
+func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	threshold := a.Cfg.QuotaThreshold
+	if threshold <= 0 || threshold > 1 {
+		threshold = 0.95
+	}
+
+	snapshots := make([]ExhaustedAccount, 0, a.Pool.Len())
+	for _, acct := range a.Pool.Accounts() {
+		snapshots = append(snapshots, acct.Snapshot(threshold, now))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object":            "list",
+		"quota_threshold":   threshold,
+		"quota_refresh_sec": a.Cfg.QuotaRefreshSec,
+		"accounts":          snapshots,
 	})
 }

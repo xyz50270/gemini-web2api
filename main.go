@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/config"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 	"github.com/ikhsan3adi/gemini-web2api/internal/server"
 )
@@ -74,28 +75,53 @@ func main() {
 
 	app := server.New(cfg, currentVersion)
 
-	// Blocking BL refresh at startup - never fail boot on error.
-	if newBL, changed, blErr := app.Gem.UpdateBLIfNeeded(); blErr != nil {
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelStartup()
+
+	// BL refresh is global (one frontend build id for all accounts).
+	probe := gemini.NewClient(cfg)
+	probe.HTTP = app.Pool.Requester()
+	if newBL, changed, blErr := probe.UpdateBLIfNeeded(); blErr != nil {
 		log.Printf("BL auto-update failed (non-fatal): %v", blErr)
 	} else if changed {
 		log.Printf("BL auto-updated: %s -> %s", cfg.GeminiBL, newBL)
 	}
 
-	app.Gem.EnsureModelsDiscovered()
-	if d := app.Gem.DiscoveredModels(); len(d) > 0 {
-		log.Printf("Discovered %d account models via otAQ7b", len(d))
+	// Per-account startup: fetch the page token if missing, discover models and
+	// read the current usage so the pool knows who is over threshold.
+	for _, acct := range app.Pool.Accounts() {
+		if cfg.AutoXSRF && acct.XSRFToken() == "" {
+			if err := app.Pool.RefreshXSRFToken(acct); err != nil {
+				log.Printf("account %s: xsrf token fetch failed: %v", acct.Label, err)
+			}
+		}
+		acct.Client.EnsureModelsDiscovered()
+		modelsFound := len(acct.Client.DiscoveredModels())
+
+		quotaDesc := "unknown"
+		if err := app.Pool.RefreshQuota(startupCtx, acct); err != nil {
+			log.Printf("account %s: quota fetch failed: %v", acct.Label, err)
+		} else if q := acct.Quota(); q != nil {
+			quotaDesc = fmt.Sprintf("tier=%s five_hour=%.1f%% weekly=%.1f%%",
+				q.Tier, poolPercent(q.FiveHour), poolPercent(q.Weekly))
+		}
+
+		log.Printf("account %s (u/%s): %s models=%d", acct.Label, acct.AuthUser, quotaDesc, modelsFound)
 	}
+
+	app.Pool.StartBackground(startupCtx)
 
 	modelKeys := make([]string, 0, len(models.MODELS))
 	for k := range models.MODELS {
 		modelKeys = append(modelKeys, k)
 	}
 
+	accountStatus := fmt.Sprintf("%d (threshold %.0f%%, refresh %ds)", app.Pool.Len(), quotaThreshold(cfg), cfg.QuotaRefreshSec)
+
 	cookieStatus := "none (anonymous)"
 	if cfg.CookieFile != "" {
 		cookieStatus = fmt.Sprintf("yes (%s)", cfg.CookieFile)
 	}
-
 	proxyStatus := cfg.Proxy
 	if proxyStatus == "" {
 		proxyStatus = "system env"
@@ -116,6 +142,7 @@ func main() {
 	fmt.Printf("  Base URL:    http://localhost:%d/v1\n", cfg.Port)
 	fmt.Printf("  Models:      %s\n", strings.Join(modelKeys, ", "))
 	fmt.Printf("  Cookie:      %s\n", cookieStatus)
+	fmt.Printf("  Accounts:    %s\n", accountStatus)
 	fmt.Printf("  Proxy:       %s\n", proxyStatus)
 	fmt.Printf("  Impersonate: %s\n", impersonateStatus)
 	fmt.Printf("  Temporary:   %s\n", temporaryStatus)
@@ -139,6 +166,8 @@ func main() {
 
 	<-stopCtx.Done()
 	log.Println("Shutting down server gracefully...")
+	app.Pool.Close()
+	cancelStartup()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -148,4 +177,18 @@ func main() {
 	}
 
 	log.Println("Stopped.")
+}
+
+func poolPercent(p *gemini.QuotaPool) float64 {
+	if p == nil {
+		return 0
+	}
+	return p.PercentageUsed * 100
+}
+
+func quotaThreshold(cfg config.Config) float64 {
+	if cfg.QuotaThreshold <= 0 || cfg.QuotaThreshold > 1 {
+		return 95
+	}
+	return cfg.QuotaThreshold * 100
 }

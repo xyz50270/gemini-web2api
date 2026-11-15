@@ -1,0 +1,570 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/ikhsan3adi/gemini-web2api/internal/config"
+	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
+	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
+)
+
+// exhaustedCooldown is how long a real upstream 429/403 keeps an account out of
+// rotation when the usage API has no fresher information to go on.
+const exhaustedCooldown = 10 * time.Minute
+
+// Account is one Google login the pool can serve requests from.
+type Account struct {
+	Index    int
+	Label    string
+	AuthUser string
+
+	Client *gemini.Client
+	Tokens *multimodal.TokenCache
+
+	mu             sync.RWMutex
+	xsrfToken      string
+	quota          *gemini.Quota
+	quotaErr       string
+	exhaustedUntil time.Time
+	lastErr        string
+	lastUsed       time.Time
+}
+
+// Quota returns a copy of the last known usage state.
+func (a *Account) Quota() *gemini.Quota {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.quota == nil {
+		return nil
+	}
+	cp := *a.quota
+	return &cp
+}
+
+// XSRFToken returns the cached page token for this account.
+func (a *Account) XSRFToken() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.xsrfToken
+}
+
+func (a *Account) setXSRFToken(tok string) {
+	a.mu.Lock()
+	a.xsrfToken = tok
+	a.mu.Unlock()
+	a.Client.Cfg.XSRFToken = tok
+}
+
+func (a *Account) setQuota(q *gemini.Quota, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err != nil {
+		a.quotaErr = err.Error()
+		return
+	}
+	a.quota = q
+	a.quotaErr = ""
+}
+
+func (a *Account) markExhausted(until time.Time) {
+	a.mu.Lock()
+	a.exhaustedUntil = until
+	a.mu.Unlock()
+}
+
+func (a *Account) clearExhausted() {
+	a.mu.Lock()
+	a.exhaustedUntil = time.Time{}
+	a.mu.Unlock()
+}
+
+func (a *Account) recordErr(err error) {
+	a.mu.Lock()
+	if err != nil {
+		a.lastErr = err.Error()
+	} else {
+		a.lastErr = ""
+	}
+	a.mu.Unlock()
+}
+
+func (a *Account) recordUse() {
+	a.mu.Lock()
+	a.lastUsed = time.Now()
+	a.mu.Unlock()
+}
+
+// Available reports whether the account may serve a request right now.
+// An account without quota data is treated as available: a failing usage probe
+// must not take the whole service offline.
+func (a *Account) Available(threshold float64, now time.Time) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if !a.exhaustedUntil.IsZero() && now.Before(a.exhaustedUntil) {
+		return false
+	}
+	if a.quota != nil {
+		if used := a.quota.MaxUsed(); used >= threshold {
+			// Still blocked until the window actually refreshes.
+			if reset, ok := a.quota.NextReset(); ok && now.Before(reset) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ExhaustedAccount is the status snapshot used for the 429 body and /v1/accounts.
+type ExhaustedAccount struct {
+	Index    int               `json:"index"`
+	Label    string            `json:"label"`
+	AuthUser string            `json:"auth_user"`
+	Available bool             `json:"available"`
+	Tier     string            `json:"tier,omitempty"`
+	Used     float64           `json:"used"`
+	FiveHour *gemini.QuotaPool `json:"five_hour,omitempty"`
+	Weekly   *gemini.QuotaPool `json:"weekly,omitempty"`
+	ResetAt  *time.Time        `json:"reset_at,omitempty"`
+	CooldownUntil *time.Time   `json:"cooldown_until,omitempty"`
+	LastError string           `json:"last_error,omitempty"`
+	QuotaError string          `json:"quota_error,omitempty"`
+}
+
+// ErrAllExhausted is returned when every account is over the usage threshold.
+type ErrAllExhausted struct {
+	Accounts []ExhaustedAccount
+}
+
+func (e *ErrAllExhausted) Error() string {
+	return fmt.Sprintf("all %d accounts have reached the quota threshold", len(e.Accounts))
+}
+
+// Pool owns the per-account clients and picks which one serves a request.
+type Pool struct {
+	cfg      config.Config
+	accounts []*Account
+	req      gemini.Requester
+	logf     func(format string, args ...any)
+
+	stopOnce sync.Once
+	stop     chan struct{}
+}
+
+// NewPool builds one gemini.Client and one TokenCache per configured account.
+// The accounts are ordered exactly as configured; Pick always prefers the first
+// available entry, which gives sticky-primary behaviour: the secondary only
+// takes traffic once the primary is over its threshold or cooling down.
+func NewPool(cfg config.Config, req gemini.Requester, logf func(format string, args ...any)) *Pool {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+
+	resolved := cfg.ResolvedAccounts()
+	p := &Pool{
+		cfg:  cfg,
+		req:  req,
+		logf: logf,
+		stop: make(chan struct{}),
+	}
+
+	httpClient := createHTTPClient(cfg)
+
+	for i, ac := range resolved {
+		acctCfg := cfg
+		acctCfg.AuthUser = ac.AuthUser
+		acctCfg.XSRFToken = ac.XSRFToken
+		acctCfg.CookieFile = ac.CookieFile
+
+		client := gemini.NewClient(acctCfg)
+		client.HTTP = req
+		client.FailFast = true
+
+		acct := &Account{
+			Index:     i,
+			Label:     ac.Label,
+			AuthUser:  ac.AuthUser,
+			Client:    client,
+			Tokens:    multimodal.NewTokenCache(acctCfg, client.Cookies, httpClient),
+			xsrfToken: ac.XSRFToken,
+		}
+		p.accounts = append(p.accounts, acct)
+	}
+
+	return p
+}
+
+// Accounts exposes the pool entries for status reporting.
+func (p *Pool) Accounts() []*Account {
+	return p.accounts
+}
+
+// Len reports how many accounts the pool manages.
+func (p *Pool) Len() int {
+	return len(p.accounts)
+}
+
+// Requester returns the shared outbound HTTP client, for image fetching.
+func (p *Pool) Requester() gemini.Requester {
+	return p.req
+}
+
+// Pick returns the first available account. Accounts listed in skip are ignored.
+func (p *Pool) Pick(skip map[int]bool) (*Account, error) {
+	now := time.Now()
+	for _, a := range p.accounts {
+		if skip != nil && skip[a.Index] {
+			continue
+		}
+		if a.Available(p.threshold(), now) {
+			return a, nil
+		}
+	}
+	return nil, p.exhaustedError(now)
+}
+
+func (p *Pool) threshold() float64 {
+	if p.cfg.QuotaThreshold <= 0 || p.cfg.QuotaThreshold > 1 {
+		return 0.95
+	}
+	return p.cfg.QuotaThreshold
+}
+
+func (p *Pool) exhaustedError(now time.Time) error {
+	out := make([]ExhaustedAccount, 0, len(p.accounts))
+	for _, a := range p.accounts {
+		out = append(out, a.Snapshot(p.threshold(), now))
+	}
+	return &ErrAllExhausted{Accounts: out}
+}
+
+// Snapshot renders the current state of one account.
+func (a *Account) Snapshot(threshold float64, now time.Time) ExhaustedAccount {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	s := ExhaustedAccount{
+		Index:     a.Index,
+		Label:     a.Label,
+		AuthUser:  a.AuthUser,
+		LastError: a.lastErr,
+		QuotaError: a.quotaErr,
+	}
+	if !a.exhaustedUntil.IsZero() && now.Before(a.exhaustedUntil) {
+		t := a.exhaustedUntil
+		s.CooldownUntil = &t
+	}
+	if q := a.quota; q != nil {
+		s.Tier = q.Tier
+		s.Used = q.MaxUsed()
+		s.FiveHour = q.FiveHour
+		s.Weekly = q.Weekly
+		if reset, ok := q.NextReset(); ok {
+			s.ResetAt = &reset
+		}
+	}
+	s.Available = a.AvailableLocked(threshold, now)
+	return s
+}
+
+// AvailableLocked mirrors Available for callers that already hold a.mu.
+func (a *Account) AvailableLocked(threshold float64, now time.Time) bool {
+	if !a.exhaustedUntil.IsZero() && now.Before(a.exhaustedUntil) {
+		return false
+	}
+	if a.quota != nil {
+		if used := a.quota.MaxUsed(); used >= threshold {
+			if reset, ok := a.quota.NextReset(); ok && now.Before(reset) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// MarkExhausted records that upstream rejected this account for quota reasons.
+func (p *Pool) MarkExhausted(a *Account, err error) {
+	a.recordErr(err)
+	a.markExhausted(time.Now().Add(exhaustedCooldown))
+	p.logf("account %s exhausted, cooling down for %s: %v", a.Label, exhaustedCooldown, err)
+}
+
+// RefreshQuota fetches the usage state for one account.
+func (p *Pool) RefreshQuota(ctx context.Context, a *Account) error {
+	info, err := a.Client.Cookies.Load()
+	if err != nil {
+		a.setQuota(nil, err)
+		return err
+	}
+	q, err := gemini.FetchQuota(ctx, p.req, info, a.AuthUser)
+	a.setQuota(q, err)
+	if err == nil {
+		// Fresh usage data supersedes a stale cooldown.
+		a.clearExhausted()
+	}
+	return err
+}
+
+// RefreshAllQuotas refreshes every account. Errors are logged, not returned,
+// except when every account fails.
+func (p *Pool) RefreshAllQuotas(ctx context.Context) error {
+	var firstErr error
+	for _, a := range p.accounts {
+		if err := p.RefreshQuota(ctx, a); err != nil {
+			p.logf("account %s: quota refresh failed: %v", a.Label, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if firstErr != nil && p.quotaKnown() == 0 {
+		return firstErr
+	}
+	return nil
+}
+
+func (p *Pool) quotaKnown() int {
+	n := 0
+	for _, a := range p.accounts {
+		if a.Quota() != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// RefreshXSRFToken reloads the page token for one account.
+func (p *Pool) RefreshXSRFToken(a *Account) error {
+	info, err := a.Client.Cookies.Load()
+	if err != nil {
+		return err
+	}
+	tok, _, err := gemini.FetchPageAuth(p.req, info, a.AuthUser)
+	if err != nil {
+		return err
+	}
+	a.setXSRFToken(tok)
+	p.logf("account %s: xsrf token refreshed", a.Label)
+	return nil
+}
+
+// StartBackground launches the quota refresh loop. Cancel ctx to stop it.
+func (p *Pool) StartBackground(ctx context.Context) {
+	interval := time.Duration(p.cfg.QuotaRefreshSec) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-p.stop:
+				return
+			case <-ticker.C:
+				// Refresh tokens that are missing or were rejected, then quotas.
+				for _, a := range p.accounts {
+					if p.cfg.AutoXSRF && a.XSRFToken() == "" {
+						_ = p.RefreshXSRFToken(a)
+					}
+				}
+				_ = p.RefreshAllQuotas(ctx)
+			}
+		}
+	}()
+}
+
+// Close stops background work.
+func (p *Pool) Close() {
+	p.stopOnce.Do(func() { close(p.stop) })
+}
+
+// ensureXSRF makes sure the account carries a usable page token, fetching one on
+// first use. It is a no-op when the account already has a token.
+func (p *Pool) ensureXSRF(a *Account) {
+	if a.XSRFToken() != "" || !p.cfg.AutoXSRF {
+		return
+	}
+	if err := p.RefreshXSRFToken(a); err != nil {
+		p.logf("account %s: xsrf refresh failed: %v", a.Label, err)
+	}
+}
+
+// uploadFor uploads the request images through one specific account.
+func (p *Pool) uploadFor(a *Account, images []format.Image) ([]string, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	return uploadImagesWith(a.Tokens, a.Client, p.req, images)
+}
+
+// Generate runs a non-streaming completion with account failover.
+func (p *Pool) Generate(prompt string, opt gemini.ModelOptions, images []format.Image) (string, error) {
+	tried := make(map[int]bool)
+	var lastErr error
+
+	for len(tried) < len(p.accounts) {
+		acct, err := p.Pick(tried)
+		if err != nil {
+			if lastErr != nil {
+				return "", lastErr
+			}
+			return "", err
+		}
+		tried[acct.Index] = true
+
+		p.ensureXSRF(acct)
+
+		fileRefs, err := p.uploadFor(acct, images)
+		if err != nil {
+			acct.recordErr(err)
+			lastErr = fmt.Errorf("account %s: image upload failed: %w", acct.Label, err)
+			continue
+		}
+
+		text, err := acct.Client.Generate(prompt, opt, fileRefs)
+		if err == nil {
+			acct.recordErr(nil)
+			acct.recordUse()
+			return text, nil
+		}
+
+		lastErr = err
+		if gemini.IsQuotaError(err) {
+			p.MarkExhausted(acct, err)
+			continue
+		}
+		if gemini.IsCredentialError(err) {
+			// The page token expires; refresh once and let the next account (or
+			// this one, on the caller's retry) use the new value.
+			acct.recordErr(err)
+			if p.cfg.AutoXSRF {
+				if rerr := p.RefreshXSRFToken(acct); rerr == nil {
+					if text, rerr := acct.Client.Generate(prompt, opt, fileRefs); rerr == nil {
+						acct.recordErr(nil)
+						acct.recordUse()
+						return text, nil
+					}
+				}
+			}
+			continue
+		}
+		return "", err
+	}
+
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", p.exhaustedError(time.Now())
+}
+
+// GenerateStream runs a streaming completion with account failover. Failover is
+// only attempted while nothing has been emitted to the client: once a delta is
+// out, the stream is committed and the error is returned as-is.
+func (p *Pool) GenerateStream(prompt string, opt gemini.ModelOptions, images []format.Image, emit func(string) error) error {
+	tried := make(map[int]bool)
+	var lastErr error
+
+	for len(tried) < len(p.accounts) {
+		acct, err := p.Pick(tried)
+		if err != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return err
+		}
+		tried[acct.Index] = true
+
+		p.ensureXSRF(acct)
+
+		fileRefs, err := p.uploadFor(acct, images)
+		if err != nil {
+			acct.recordErr(err)
+			lastErr = fmt.Errorf("account %s: image upload failed: %w", acct.Label, err)
+			continue
+		}
+
+		emitted := false
+		tracked := func(delta string) error {
+			emitted = true
+			return emit(delta)
+		}
+
+		err = acct.Client.GenerateStream(prompt, opt, fileRefs, tracked)
+		if err == nil {
+			acct.recordErr(nil)
+			acct.recordUse()
+			return nil
+		}
+		if emitted {
+			// Client already has partial output; a different account would
+			// restart the text, so surface the error instead.
+			acct.recordErr(err)
+			return err
+		}
+
+		lastErr = err
+		if gemini.IsQuotaError(err) {
+			p.MarkExhausted(acct, err)
+			continue
+		}
+		if gemini.IsCredentialError(err) {
+			acct.recordErr(err)
+			if p.cfg.AutoXSRF {
+				if rerr := p.RefreshXSRFToken(acct); rerr == nil {
+					emitted = false
+					err = acct.Client.GenerateStream(prompt, opt, fileRefs, tracked)
+					if err == nil {
+						acct.recordErr(nil)
+						acct.recordUse()
+						return nil
+					}
+					if emitted {
+						acct.recordErr(err)
+						return err
+					}
+					lastErr = err
+				}
+			}
+			continue
+		}
+		return err
+	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+	return p.exhaustedError(time.Now())
+}
+
+// IsAllExhausted reports whether err means the pool had nothing to serve with.
+func IsAllExhausted(err error) bool {
+	var e *ErrAllExhausted
+	return errors.As(err, &e)
+}
+
+// writeExhaustedJSON renders the 429 response for a fully spent pool.
+func writeExhaustedJSON(w http.ResponseWriter, err error) bool {
+	var e *ErrAllExhausted
+	if !errors.As(err, &e) {
+		return false
+	}
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"error": map[string]any{
+			"message":  e.Error(),
+			"type":     "insufficient_quota",
+			"code":     "all_accounts_exhausted",
+			"accounts": e.Accounts,
+		},
+	})
+	return true
+}

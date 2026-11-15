@@ -8,13 +8,11 @@ import (
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/config"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
-	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
 
 type App struct {
 	Cfg        config.Config
-	Gem        *gemini.Client
-	Tokens     *multimodal.TokenCache
+	Pool       *Pool
 	HTTPClient *http.Client
 	Logf       func(format string, args ...any)
 	Version    string
@@ -36,8 +34,6 @@ func createHTTPClient(cfg config.Config) *http.Client {
 }
 
 func New(cfg config.Config, version string) *App {
-	gemClient := gemini.NewClient(cfg)
-
 	logFn := func(format string, args ...any) {
 		if cfg.LogRequests {
 			log.Printf(format, args...)
@@ -46,10 +42,15 @@ func New(cfg config.Config, version string) *App {
 
 	httpClient := createHTTPClient(cfg)
 
+	// The pool shares one outbound requester across accounts, so proxy and TLS
+	// settings stay uniform.
+	var requester gemini.Requester
+	probe := gemini.NewClient(cfg)
+	requester = probe.HTTP
+
 	app := &App{
 		Cfg:        cfg,
-		Gem:        gemClient,
-		Tokens:     multimodal.NewTokenCache(cfg, gemClient.Cookies, httpClient),
+		Pool:       NewPool(cfg, requester, logFn),
 		HTTPClient: httpClient,
 		Logf:       logFn,
 		Version:    version,
@@ -68,6 +69,8 @@ func (a *App) Handler() http.Handler {
 
 	mux.HandleFunc("GET /v1beta/models", a.handleGoogleModels)
 	mux.HandleFunc("POST /v1beta/models/{target}", a.handleGoogleGenerate)
+
+	mux.HandleFunc("GET /v1/accounts", a.handleAccounts)
 
 	handler := a.withAuthAndLogging(mux)
 	handler = a.withCORS(handler)

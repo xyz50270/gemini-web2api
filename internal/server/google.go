@@ -69,13 +69,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fileRefs, err := a.uploadImages(images)
-	if err != nil {
-		a.Logf("Google API image upload error: %v", err)
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
-		return
-	}
-	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d", resolved.Name, stream, hasTools, len(prompt), len(fileRefs))
+	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d", resolved.Name, stream, hasTools, len(prompt), len(images))
 
 	gemOpt := gemini.ModelOptions{
 		ModelName:   resolved.Name,
@@ -86,14 +80,19 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if stream && !hasTools {
-		if !startSSE(w) {
-			return
-		}
+		// Lazy SSE so a pre-first-token failure can fail over or return JSON.
+		started := false
 
 		var fullText string
-		emitErr := a.Gem.GenerateStream(prompt, gemOpt, fileRefs, func(delta string) error {
+		emitErr := a.Pool.GenerateStream(prompt, gemOpt, images, func(delta string) error {
 			if delta == "" {
 				return nil
+			}
+			if !started {
+				started = true
+				if !startSSE(w) {
+					return errClientGone
+				}
 			}
 			fullText += delta
 			chunkObj := models.GoogleGenerateResponse{
@@ -113,7 +112,16 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 			return writeSSEData(w, chunkObj)
 		})
 
+		if emitErr == errClientGone {
+			return
+		}
+
 		if emitErr == nil {
+			if !started {
+				if !startSSE(w) {
+					return
+				}
+			}
 			promptTokens := len(prompt) / 4
 			candidatesTokens := len(fullText) / 4
 			finalChunk := models.GoogleGenerateResponse{
@@ -131,14 +139,25 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 				ModelVersion: resolved.Name,
 			}
 			_ = writeSSEData(w, finalChunk)
-		} else {
-			a.Logf("Google stream error: %v", emitErr)
+			return
 		}
+
+		if !started {
+			if writeExhaustedJSON(w, emitErr) {
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", emitErr)}})
+			return
+		}
+		a.Logf("Google stream error: %v", emitErr)
 		return
 	}
 
-	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
+	text, err := a.Pool.Generate(prompt, gemOpt, images)
 	if err != nil {
+		if writeExhaustedJSON(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
 	}
