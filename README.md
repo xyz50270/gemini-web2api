@@ -297,7 +297,7 @@ Create `config.json` in the same directory:
 }
 ```
 
-When `api_keys` is empty `[]`, authentication is disabled. When keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>`.
+When `api_keys` is empty `[]`, authentication is disabled. When keys are set, **every** route requires a key, including the health endpoint at `/`. Accepted forms: `Authorization: Bearer <key>`, `x-api-key`, `x-goog-api-key`, or `?key=`.
 
 ## Multiple Accounts with Automatic Failover
 

@@ -90,7 +90,12 @@ func (a *App) withAuthAndLogging(next http.Handler) http.Handler {
 		start := time.Now()
 		lrw := newLoggingResponseWriter(w)
 
-		if strings.HasPrefix(r.URL.Path, "/v1") && !authorize(r, a.Cfg.APIKeys) {
+		// Every route is protected once api_keys is configured, including the
+		// health endpoint at "/". That endpoint used to be exempt, which leaked
+		// the version string and the full model list to unauthenticated callers.
+		// With api_keys empty, authorize() returns true and everything stays open
+		// as before.
+		if !authorize(r, a.Cfg.APIKeys) {
 			writeJSON(lrw, http.StatusUnauthorized, map[string]any{
 				"error": map[string]any{
 					"message": "invalid api key",

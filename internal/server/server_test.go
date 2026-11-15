@@ -233,3 +233,91 @@ func TestModelHeaders(t *testing.T) {
 		t.Errorf("Expected X-Model-Fallback=true for unknown model, got %q", got)
 	}
 }
+
+func TestHealthRequiresAuthWhenKeysConfigured(t *testing.T) {
+	cfg := config.Default()
+	cfg.APIKeys = []string{"sk-secret-key"}
+	app := New(cfg, "test-version")
+	handler := app.Handler()
+
+	// Health used to be exempt from auth, leaking the version and model list.
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET / without a key = %d, want 401", rec.Code)
+	}
+
+	// A wrong key must not pass either.
+	req = httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer nope")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET / with a wrong key = %d, want 401", rec.Code)
+	}
+
+	// With a valid key the payload is served, and it must not leak the model
+	// list to callers who did not authenticate.
+	req = httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer sk-secret-key")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / with a valid key = %d, want 200", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("unexpected health body: %v", body)
+	}
+}
+
+func TestAllRoutesRequireAuthWhenKeysConfigured(t *testing.T) {
+	cfg := config.Default()
+	cfg.APIKeys = []string{"sk-secret-key"}
+	app := New(cfg, "test-version")
+	handler := app.Handler()
+
+	routes := []struct{ method, path string }{
+		{"GET", "/"},
+		{"GET", "/v1/models"},
+		{"POST", "/v1/chat/completions"},
+		{"POST", "/v1/responses"},
+		{"GET", "/v1/accounts"},
+		{"GET", "/v1beta/models"},
+		{"POST", "/v1beta/models/gemini-3.6-flash:generateContent"},
+		{"GET", "/does-not-exist"},
+	}
+	for _, rt := range routes {
+		req := httptest.NewRequest(rt.method, rt.path, strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without a key = %d, want 401", rt.method, rt.path, rec.Code)
+		}
+	}
+}
+
+func TestRoutesOpenWhenNoKeysConfigured(t *testing.T) {
+	cfg := config.Default()
+	cfg.APIKeys = nil // legacy behaviour: auth disabled
+	app := New(cfg, "test-version")
+	handler := app.Handler()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET / with auth disabled = %d, want 200", rec.Code)
+	}
+
+	req = httptest.NewRequest("GET", "/v1/models", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /v1/models with auth disabled = %d, want 200", rec.Code)
+	}
+}
